@@ -30,14 +30,12 @@ py -m pip install requests
 
 ### Add your keys to the shared keys file
 
-Open `api_keys.py` in the main `Scripts_SOC` folder and paste your keys between the quotes:
+Open `api_keys.py` in the main folder and paste your keys between the quotes:
 
 ```python
 ABUSEIPDB_API_KEY = "your_abuseipdb_key_here"
 VIRUSTOTAL_API_KEY = "your_virustotal_key_here"
 ```
-
-If `api_keys.py` doesn't exist yet, copy `api_keys.example.py` to `api_keys.py` first. Save the file. All scripts in this repo read from it, and you won't need to pass keys on the command line anymore.
 
 You can also use environment variables (`ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY`) or the `--abusekey` / `--vtkey` flags, which take priority over the file.
 
