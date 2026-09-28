@@ -18,7 +18,7 @@ A Python script that checks **IP addresses** against [AbuseIPDB](https://www.abu
 Open a terminal (VS Code terminal or CMD) and run:
 
 ```bash
-py -m pip install requests
+python3 -m pip install requests
 ```
 
 ---
@@ -49,27 +49,27 @@ You can also use environment variables (`ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY
 
 ### Check a single IP
 ```bash
-python threat_lookup.py --indicators 1[.]2[.]3[.]4
+python3 threat_lookup.py --indicators 1[.]2[.]3[.]4
 ```
 
 ### Check multiple IPs
 ```bash
-python threat_lookup.py --indicators 1[.]2[.]3[.]4 8[.]8[.]8[.]8
+python3 threat_lookup.py --indicators 1[.]2[.]3[.]4 8[.]8[.]8[.]8
 ```
 
 ### Check a single hash
 ```bash
-python threat_lookup.py --indicators <SHA256>
+python3 threat_lookup.py --indicators <SHA256>
 ```
 
 ### Check multiple hashes
 ```bash
-python threat_lookup.py --indicators <SHA256> <MD5>
+python3 threat_lookup.py --indicators <SHA256> <MD5>
 ```
 
 ### Mix IPs and hashes in the same command
 ```bash
-python threat_lookup.py --indicators 1[.]2[.]3[.]4 <SHA256>
+python3 threat_lookup.py --indicators 1[.]2[.]3[.]4 <SHA256>
 ```
 
 ---
@@ -103,7 +103,7 @@ d41d8cd98f00b204e9800998ecf8427e
 
 Then run:
 ```bash
-python threat_lookup.py --file indicators.txt
+python3 threat_lookup.py --file indicators.txt
 ```
 
 ---
@@ -113,12 +113,12 @@ python threat_lookup.py --file indicators.txt
 Add `--json` followed by a filename to export results:
 
 ```bash
-python threat_lookup.py --indicators <IP> <Hash> --json results.json
+python3 threat_lookup.py --indicators <IP> <Hash> --json results.json
 ```
 
 You can combine it with any other option:
 ```bash
-python threat_lookup.py --file indicators.txt --json results.json
+python3 threat_lookup.py --file indicators.txt --json results.json
 ```
 
 ---
@@ -156,7 +156,7 @@ Results are color-coded in the terminal:
 
 If you're checking many indicators, increase the delay between calls with `--delay`:
 ```bash
-python threat_lookup.py --file indicators.txt --delay 15
+python3 threat_lookup.py --file indicators.txt --delay 15
 ```
 
 ---

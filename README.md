@@ -12,7 +12,7 @@ Ideas for future scripts:
 
 - [ ] Shodan IP enrichment
 - [ ] WHOIS lookup
-- [ ] Email header analyzer
+- [x] Email header analyzer
 - [ ] IOC extractor from text/emails
 - [ ] Log parser utilities
 
