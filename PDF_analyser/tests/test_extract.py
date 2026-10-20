@@ -49,8 +49,9 @@ class ExtractTests(unittest.TestCase):
     def test_inline_js(self):
         pdf = _load({1: "<< /Type /Catalog >>", 4: "<< /S /JavaScript /JS (app.alert\\(1\\)) >>"})
         res = ex.find_javascript(pdf)
-        self.assertEqual(res, [{"object": 4, "objstm": None, "source_object": 4,
-                                "code": "app.alert(1)"}])
+        self.assertEqual(res, [{"object": 4, "objstm": None, "copy": None, "source_object": 4,
+                                "source_copy": None, "code": "app.alert(1)",
+                                "data": None}])
 
     def test_js_in_referenced_stream(self):
         pdf = _load({1: "<< /Type /Catalog >>", 2: "<< /S /JavaScript /JS 3 0 R >>",
@@ -72,8 +73,9 @@ class ExtractTests(unittest.TestCase):
 
     def test_dangling_js_reference(self):
         pdf = _load({1: "<< /JS 9 0 R >>"})
-        self.assertEqual(ex.find_javascript(pdf), [{"object": 1, "objstm": None,
-                                                    "source_object": 9, "code": ""}])
+        self.assertEqual(ex.find_javascript(pdf), [{"object": 1, "objstm": None, "copy": None,
+                                                    "source_object": 9, "source_copy": None,
+                                                    "code": "", "data": None}])
 
     def test_js_dedup_by_source(self):
         pdf = _load({2: "<< /JS 3 0 R >>", 4: "<< /JS 3 0 R >>",
@@ -91,8 +93,9 @@ class ExtractTests(unittest.TestCase):
 
     def test_openaction_to_js_ref(self):
         pdf = _load({1: "<< /OpenAction 2 0 R >>", 2: "<< /S /JavaScript /JS (x) >>"})
-        self.assertEqual(ex.find_triggers(pdf), [{"object": 1, "objstm": None,
-                         "keyword": "/OpenAction", "action": "/JavaScript", "target_object": 2}])
+        self.assertEqual(ex.find_triggers(pdf), [{"object": 1, "objstm": None, "copy": None,
+                         "keyword": "/OpenAction", "action": "/JavaScript", "target_object": 2,
+                         "target_copy": None}])
 
     def test_openaction_inline_dict(self):
         pdf = _load({1: "<< /OpenAction << /S /Launch /F (a.exe) >> >>"})

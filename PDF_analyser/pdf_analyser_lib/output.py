@@ -88,8 +88,14 @@ def write_outputs(result: dict, run_dir: Path) -> List[Path]:
     taken = {"report.txt"}
     for item in result.get("extracted", []):
         obj, kind = item["object"], item["kind"]
+        if item.get("copy") is not None:
+            obj = f"{obj}_copy{item['copy']}"
         if kind == "javascript":
-            path = _unique(run_dir, f"obj{obj}_javascript", ".js.txt", used, taken)
+            stem = f"obj{obj}_javascript"
+            # A script from another, repeated object: say which copy it came from.
+            if item.get("source_copy") is not None and item["source_object"] != item["object"]:
+                stem += f"_from_obj{item['source_object']}_copy{item['source_copy']}"
+            path = _unique(run_dir, stem, ".js.txt", used, taken)
         elif kind == "embedded_file":
             name = _sanitise(os.path.basename(item.get("name") or "")).strip(".")[:_MAX_NAME]
             stem = f"obj{obj}_embedded_{name}" if name else f"obj{obj}_embedded"

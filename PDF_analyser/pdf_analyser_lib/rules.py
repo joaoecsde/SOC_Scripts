@@ -4,8 +4,10 @@ Severity:
     high    automatic or clearly malicious behaviour (JS on open, obfuscated JS,
             executable attachment, form submission to an external target)
     medium  active content that needs a look (plain JS, attachments, /Launch,
-            /RichMedia, local /SubmitForm or /GoToR)
-    info    context only (/URI, /ObjStm, /XObject, destination triggers)
+            /ImportData, /RichMedia, /XFA, local /SubmitForm, /GoToR or /GoToE,
+            an object defined more than once with active content in a copy)
+    info    context only (/URI, /ObjStm, /XObject, destination triggers, an
+            object defined more than once without active content)
 
 Values are stored raw; defanging happens in the report.
 """
@@ -17,7 +19,8 @@ from typing import Dict, List, Optional
 from . import config
 
 _MARKER_RES = {name: re.compile(rx) for name, rx in config.JS_MARKERS.items()}
-_HIGH_TRIGGER_ACTIONS = ("/JavaScript", "/URI", "/SubmitForm", "/GoToR", "/Launch")
+_HIGH_TRIGGER_ACTIONS = ("/JavaScript", "/URI", "/SubmitForm", "/GoToR", "/GoToE", "/Launch",
+                         "/ImportData")
 _EXTERNAL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
@@ -44,8 +47,8 @@ def is_external(target: str) -> bool:
 def _finding(severity: str, keyword: str, item: dict, text: str, preview: Optional[str] = None,
              markers: Optional[List[str]] = None, target: Optional[str] = None) -> dict:
     return {"severity": severity, "keyword": keyword, "object": item["object"],
-            "objstm": item.get("objstm"), "finding": text, "preview": preview,
-            "markers": markers or [], "target": target}
+            "objstm": item.get("objstm"), "copy": item.get("copy"), "finding": text,
+            "preview": preview, "markers": markers or [], "target": target}
 
 
 def _preview(code: str) -> str:
@@ -58,16 +61,18 @@ def evaluate(facts: Dict) -> List[dict]:
 
     Args:
         facts: Dict with ``javascript``, ``actions``, ``triggers``, ``embedded``,
-            ``keywords`` and ``richmedia`` (Task 2 output).
+            ``keywords``, ``richmedia`` and ``duplicates`` (Task 2 output).
 
     Returns:
-        List of finding dicts with severity, keyword, object, objstm, finding,
-        preview, markers and target.
+        List of finding dicts with severity, keyword, object, objstm, copy,
+        finding, preview, markers and target.
     """
     out: List[dict] = []
 
     for t in facts.get("triggers", []):
         kw = t["keyword"]
+        via = (" (obj %d, copy %d)" % (t["target_object"], t["target_copy"])
+               if t.get("target_copy") is not None else "")
         if t.get("action") in _HIGH_TRIGGER_ACTIONS:
             if kw == "/Names":
                 text = "Document-level JavaScript runs when the document opens"
@@ -77,13 +82,16 @@ def evaluate(facts: Dict) -> List[dict]:
             else:
                 text = ("Runs a %s action automatically on a document event"
                         % t["action"].lstrip("/"))
-            out.append(_finding("high", kw, t, text))
+            out.append(_finding("high", kw, t, text + via))
         else:
             out.append(_finding("info", kw, t, "Automatic trigger with no active action "
-                                "(page destination or other action type)"))
+                                "(page destination or other action type)" + via))
 
     for j in facts.get("javascript", []):
         code = j.get("code") or ""
+        where = (" (script in obj %d, copy %d)" % (j["source_object"], j["source_copy"])
+                 if j.get("source_copy") is not None and j["source_object"] != j["object"]
+                 else "")
         if not code:
             out.append(_finding("medium", "/JavaScript", j,
                                 "Contains JavaScript, but the script could not be resolved"))
@@ -91,10 +99,10 @@ def evaluate(facts: Dict) -> List[dict]:
         markers = js_markers(code)
         if markers:
             out.append(_finding("high", "/JavaScript", j,
-                                "Contains JavaScript with obfuscation markers: " + ", ".join(markers),
-                                _preview(code), markers))
+                                "Contains JavaScript with obfuscation markers: "
+                                + ", ".join(markers) + where, _preview(code), markers))
         else:
-            out.append(_finding("medium", "/JavaScript", j, "Contains JavaScript",
+            out.append(_finding("medium", "/JavaScript", j, "Contains JavaScript" + where,
                                 _preview(code)))
 
     for e in facts.get("embedded", []):
@@ -113,8 +121,13 @@ def evaluate(facts: Dict) -> List[dict]:
         elif typ == "/Launch":
             out.append(_finding("medium", typ, a, "Launches an external program or file",
                                 target=target))
-        elif typ in ("/SubmitForm", "/GoToR"):
-            what = "Submits form data to" if typ == "/SubmitForm" else "Opens a remote document at"
+        elif typ == "/ImportData":
+            out.append(_finding("medium", typ, a, "Imports form data from a file",
+                                target=target))
+        elif typ in ("/SubmitForm", "/GoToR", "/GoToE"):
+            what = {"/SubmitForm": "Submits form data to",
+                    "/GoToR": "Opens a remote document at",
+                    "/GoToE": "Opens an embedded document in"}[typ]
             if is_external(target or ""):
                 out.append(_finding("high", typ, a, what + " an external target", target=target))
             else:
@@ -123,10 +136,22 @@ def evaluate(facts: Dict) -> List[dict]:
     for oid in facts.get("keywords", {}).get("/RichMedia", []):
         out.append(_finding("medium", "/RichMedia", {"object": oid},
                             "Contains embedded rich media (Flash/video/3D)"))
+    for oid in facts.get("keywords", {}).get("/XFA", []):
+        out.append(_finding("medium", "/XFA", {"object": oid},
+                            "Contains an XFA form (can hold scripts, have a look)"))
     for kw, text in (("/ObjStm", "Uses object streams (compressed objects)"),
                      ("/XObject", "Contains external objects (images or forms)")):
         for oid in facts.get("keywords", {}).get(kw, []):
             out.append(_finding("info", kw, {"object": oid}, text))
+
+    for d in facts.get("duplicates", []):
+        text = "Object %d occurs %d times" % (d["object"], d["count"])
+        if d["active"]:
+            out.append(_finding("medium", "Duplicate object", d,
+                                text + "; a copy contains active content (%s)"
+                                % ", ".join(d["active"])))
+        else:
+            out.append(_finding("info", "Duplicate object", d, text))
     return out
 
 

@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
 import pdf_parser  # noqa: E402
@@ -25,6 +25,12 @@ class PdfObject:
     objstm: Optional[int]   # id of the containing /ObjStm, else None
     element: object         # pdf_parser cPDFElementIndirectObject
     parent: Optional["ParsedPdf"] = field(default=None, repr=False)
+    copy: int = 1           # 1-based position among the copies of this id, in file order
+
+    @property
+    def duplicated(self) -> bool:
+        """True when the file defines this object id more than once."""
+        return self.parent is not None and len(self.parent.objects.get(self.id, [])) > 1
 
     def _dict(self):
         """Parse the object's dictionary; on failure record an error and return an empty parse.
@@ -38,9 +44,9 @@ class PdfObject:
             head = self.element.ContainsStream() or self.element.content
             return pdf_parser.cPDFParseDictionary(head, False)
         except Exception as exc:
-            msg = "object %d: dictionary not parsed (%s)" % (self.id, type(exc).__name__)
-            if self.parent is not None and msg not in self.parent.errors:
-                self.parent.errors.append(msg)
+            if self.parent is not None:
+                self.parent.add_error_once(
+                    "object %d: dictionary not parsed (%s)" % (self.id, type(exc).__name__))
             return pdf_parser.cPDFParseDictionary([], False)
 
     def items(self) -> list:
@@ -94,7 +100,7 @@ class PdfObject:
             return data
         if data != "No filters":
             if self.parent is not None:
-                self.parent.errors.append(
+                self.parent.add_error_once(
                     "object %d: stream not decoded (%s)" % (self.id, str(data)[:80]))
         try:
             raw = self.element.Stream(False)
@@ -113,9 +119,16 @@ class PdfObject:
 class ParsedPdf:
     """Result of ``load_pdf``."""
 
-    objects: Dict[int, PdfObject] = field(default_factory=dict)
+    objects: Dict[int, List[PdfObject]] = field(default_factory=dict)
     encrypted: bool = False
     errors: List[str] = field(default_factory=list)
+    _logged: Set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+
+    def add_error_once(self, msg: str) -> None:
+        """Append ``msg`` to ``errors`` unless it is already there."""
+        if msg not in self._logged:
+            self._logged.add(msg)
+            self.errors.append(msg)
 
     @property
     def partial(self) -> bool:
@@ -127,16 +140,21 @@ def _expand_objstm(obj) -> StringIO:
     """Build a synthesised PDF text from an ``/ObjStm`` object.
 
     Copied from vendor/pdf_parser.py (main(), the ``options.objstm`` branch,
-    lines ~1598-1620); only the error handling and variable names differ.
+    lines ~1598-1620); only the error handling and variable names differ, and
+    an unfiltered stream is read raw (pdf_parser returns 'No filters' for it).
 
     Raises:
-        Exception: If the object's index is inconsistent.
+        Exception: If the object's index is inconsistent or the stream cannot be decoded.
     """
     c2s = pdf_parser.C2SIP3
     d = pdf_parser.cPDFParseDictionary(obj.ContainsStream(), False)
     number_of_objects = int(d.Get("/N")[0])
     offset_first = int(d.Get("/First")[0])
     stream = obj.Stream()
+    if stream == "No filters":
+        stream = obj.Stream(False).encode("latin-1")
+    elif not isinstance(stream, bytes):
+        raise Exception(stream)
     indexes = list(map(int, c2s(stream)[:offset_first].strip().replace("\n", " ").split(" ")))
     if len(indexes) % 2 != 0 or len(indexes) / 2 != number_of_objects:
         raise Exception("Error in index of /ObjStm stream")
@@ -161,9 +179,11 @@ def load_pdf(path: str) -> ParsedPdf:
         path: Path to the PDF.
 
     Returns:
-        ParsedPdf. The last definition of an object id wins (incremental
-        updates). Objects inside ``/ObjStm`` streams are included with
-        ``objstm`` set to the container's id.
+        ParsedPdf. Every definition of an object id is kept, in file order:
+        a reader picks a copy through the xref, which a crafted file can
+        point at an earlier copy, so none may be dropped. Objects inside
+        ``/ObjStm`` streams are included with ``objstm`` set to the
+        container's id.
 
     Raises:
         OSError: If the file cannot be read.
@@ -173,7 +193,8 @@ def load_pdf(path: str) -> ParsedPdf:
     pdf = ParsedPdf()
 
     def add(element, objstm=None):
-        pdf.objects[element.id] = PdfObject(element.id, objstm, element, pdf)
+        copies = pdf.objects.setdefault(element.id, [])
+        copies.append(PdfObject(element.id, objstm, element, pdf, len(copies) + 1))
 
     try:
         parser = pdf_parser.cPDFParser(BytesIO(data))
@@ -208,14 +229,15 @@ def load_pdf(path: str) -> ParsedPdf:
                         inner = pdf_parser.cPDFParser(
                             text, False, None, (element.id, element.version))
                     except Exception as exc:
-                        pdf.errors.append("object %d: bad /ObjStm index (%s)" % (element.id, exc))
+                        pdf.errors.append("object %d: /ObjStm not expanded (%s)" % (element.id, exc))
             elif element.type == pdf_parser.PDF_ELEMENT_TRAILER:
                 saw_trailer = True
-                if any("/Encrypt" in tok[1] for tok in element.content):
+                if any(pdf_parser.EqualCanonical(tok[1], "/Encrypt") for tok in element.content):
                     pdf.encrypted = True
         if parser.context == pdf_parser.CONTEXT_OBJ:
             pdf.errors.append("truncated: object %s has no endobj" % parser.objectId)
-        if not saw_trailer and not any(o.type() == "/XRef" for o in pdf.objects.values()):
+        if not saw_trailer and not any(o.type() == "/XRef"
+                                       for c in pdf.objects.values() for o in c):
             pdf.errors.append("no trailer or xref stream found")
     except Exception as exc:  # defensive: parser internals must not crash the tool
         pdf.errors.append("parse failed: %s" % exc)

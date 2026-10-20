@@ -10,8 +10,8 @@ import os
 from typing import List
 
 from . import __version__
-from .extract import (find_actions, find_embedded_files, find_javascript, find_keywords,
-                      find_richmedia_streams, find_triggers)
+from .extract import (find_actions, find_duplicates, find_embedded_files, find_javascript,
+                      find_keywords, find_richmedia_streams, find_triggers)
 from .parser import load_pdf
 from .rules import evaluate, verdict
 
@@ -25,7 +25,8 @@ def analyse_pdf(path: str) -> dict:
     Returns:
         Dict with ``file``, ``path``, ``size``, ``sha256``, ``tool_version``,
         ``verdict``, ``encrypted``, ``partial``, ``errors``, ``findings`` and
-        ``extracted`` (list of ``{"object", "kind", "name", "data"}``).
+        ``extracted`` (list of ``{"object", "copy", "kind", "name", "data"}``;
+        JavaScript items also carry ``source_object`` and ``source_copy``).
 
     Raises:
         OSError: If the file cannot be read.
@@ -39,7 +40,8 @@ def analyse_pdf(path: str) -> dict:
     richmedia = find_richmedia_streams(pdf)
     facts = {"javascript": javascript, "actions": find_actions(pdf),
              "triggers": find_triggers(pdf), "embedded": embedded,
-             "keywords": find_keywords(pdf), "richmedia": richmedia}
+             "keywords": find_keywords(pdf), "richmedia": richmedia,
+             "duplicates": find_duplicates(pdf)}
     findings = evaluate(facts)
 
     extracted: List[dict] = []
@@ -47,19 +49,18 @@ def analyse_pdf(path: str) -> dict:
         if j.get("code"):
             # A script from a referenced stream is saved byte-exact; an inline
             # string script is saved as UTF-8 text.
-            source = pdf.objects.get(j["source_object"])
-            data = source.stream() if source is not None and \
-                j["source_object"] != j["object"] else None
+            data = j["data"] if j["source_object"] != j["object"] else None
             if data is None:
                 data = j["code"].encode("utf-8", "replace")
-            extracted.append({"object": j["object"], "kind": "javascript", "name": None,
-                              "data": data})
+            extracted.append({"object": j["object"], "copy": j["copy"], "kind": "javascript",
+                              "name": None, "data": data, "source_object": j["source_object"],
+                              "source_copy": j["source_copy"]})
     for e in embedded:
-        extracted.append({"object": e["object"], "kind": "embedded_file",
+        extracted.append({"object": e["object"], "copy": e["copy"], "kind": "embedded_file",
                           "name": e.get("name"), "data": e["data"]})
     for m in richmedia:
-        extracted.append({"object": m["object"], "kind": "richmedia", "name": None,
-                          "data": m["data"]})
+        extracted.append({"object": m["object"], "copy": m["copy"], "kind": "richmedia",
+                          "name": None, "data": m["data"]})
 
     return {"file": os.path.basename(path), "path": path, "size": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(), "tool_version": __version__,

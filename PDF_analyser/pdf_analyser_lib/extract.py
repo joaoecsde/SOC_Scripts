@@ -3,17 +3,28 @@
 Everything is read through ``PdfObject.get`` / ``stream`` (pdf_parser does the
 tokenising and filtering). Extracted content is only decoded, never executed.
 All ``find_*`` functions return plain dicts so they serialise to JSON.
+
+An object id can be defined more than once (see ``load_pdf``). Every copy is
+scanned and a reference follows every copy of its target, whatever the
+generation number: readers may ignore a mismatch, so no copy is skipped.
+Each result's ``copy`` is the copy number when the id has several copies,
+else None.
 """
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from .parser import ParsedPdf, PdfObject, pdf_parser
 
-ACTION_TYPES = ("/URI", "/SubmitForm", "/GoToR", "/Launch")
+ACTION_TYPES = ("/URI", "/SubmitForm", "/GoToR", "/GoToE", "/Launch", "/ImportData")
 # Actions that make an automatic trigger HIGH (the same set rules.py grades).
 _ACTIVE_ACTIONS = ("/JavaScript",) + ACTION_TYPES
+# Names that make a duplicated object worth a look (rules.py grades it medium).
+# /OpenAction and /AA are left out: most only go to a page, and a trigger that
+# runs a script reaches a /JS or /JavaScript name, which is listed.
+DUPLICATE_ACTIVE_NAMES = ("/JS", "/JavaScript", "/Launch", "/SubmitForm", "/GoToR", "/GoToE",
+                          "/ImportData", "/EmbeddedFile")
 _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
 
 
@@ -93,6 +104,16 @@ def _items(obj: PdfObject) -> list:
     return obj.items()
 
 
+def _all(pdf: ParsedPdf) -> Iterator[PdfObject]:
+    """Every copy of every object, by id and then in file order."""
+    for oid in sorted(pdf.objects):
+        yield from pdf.objects[oid]
+
+
+def _copy(obj: Optional[PdfObject]) -> Optional[int]:
+    return obj.copy if obj is not None and obj.duplicated else None
+
+
 def _segments(items):
     """Split a parsed dict into runs of unique keys.
 
@@ -141,14 +162,27 @@ def _name(tokens) -> Optional[str]:
     return None
 
 
-def _resolve(pdf: ParsedPdf, value):
-    """Return (items, target_object) for a dict value, a ref to an object, or neither."""
+def _resolve(pdf: ParsedPdf, value) -> list:
+    """Return ``(items, target)`` pairs for a dict value or a ref to an object.
+
+    A dict gives one pair with target None; a reference gives one pair per
+    copy of its target, with that copy's ``PdfObject`` as target; anything
+    else gives an empty list.
+    """
     if _is_dict(value):
-        return value, None
+        return [(value, None)]
     ids = ref_ids(value)
     if len(ids) == 1 and ids[0] in pdf.objects and not _is_array(value):
-        return _items(pdf.objects[ids[0]]), ids[0]
-    return None, None
+        return [(_items(o), o) for o in pdf.objects[ids[0]]]
+    return []
+
+
+def _value_key(value):
+    """Hashable key for a dict value: the target id for a reference ``_resolve`` follows."""
+    ids = ref_ids(value)
+    if len(ids) == 1 and not _is_array(value) and not _is_dict(value):
+        return ("ref", ids[0])
+    return repr(value)
 
 
 def _is_array(value) -> bool:
@@ -156,14 +190,18 @@ def _is_array(value) -> bool:
 
 
 def _filespec_name(pdf: ParsedPdf, value) -> Optional[str]:
-    """Name from a string, an inline filespec dict, or a reference to one."""
-    items, _ = _resolve(pdf, value)
-    if items is None:
+    """Name from a string, an inline filespec dict, or a reference to one.
+
+    For a reference, the first copy of the target that has a name wins.
+    """
+    resolved = _resolve(pdf, value)
+    if not resolved:
         return decode_pdf_string(value) or None
-    for key in ("/UF", "/F"):
-        s = decode_pdf_string(_lookup(items, key))
-        if s:
-            return s
+    for items, _ in resolved:
+        for key in ("/UF", "/F"):
+            s = decode_pdf_string(_lookup(items, key))
+            if s:
+                return s
     return None
 
 
@@ -171,33 +209,45 @@ def find_javascript(pdf: ParsedPdf) -> List[dict]:
     """Find JavaScript held in ``/JS`` entries.
 
     Returns:
-        Dicts ``{"object", "objstm", "source_object", "code"}``, deduplicated
-        by ``source_object``.
+        Dicts ``{"object", "objstm", "copy", "source_object", "source_copy",
+        "code", "data"}``, one per copy of a referenced script, deduplicated
+        by source copy. ``source_copy`` is the copy of ``source_object``
+        holding the script when that id has several copies, else None.
+        ``data`` is the script stream's bytes, or None for a string script.
     """
     results, seen = [], set()
-    for oid in sorted(pdf.objects):
-        obj = pdf.objects[oid]
+    for obj in _all(pdf):
+        oid = obj.id
         for value in _js_values(_items(obj)):
             ids = ref_ids(value)
             if ids:
                 source = ids[0]
-                if source in pdf.objects:
-                    ref = pdf.objects[source]
+                # A dangling reference keeps one empty entry as evidence.
+                entries = [((source, ref.copy), ref, None)
+                           for ref in pdf.objects.get(source, [])] or [((source, None), None, "")]
+            else:
+                # Several inline scripts in one object stay distinct.
+                code = decode_pdf_string(value)
+                source, entries = oid, [((oid, code), obj, code)]
+            for key, ref, code in entries:
+                if key in seen:
+                    continue
+                seen.add(key)
+                data = None
+                if code is None:   # decoded only once the copy is known to be new
                     data = ref.stream()
                     code = _bytes_to_text(data) if data is not None \
-                        else decode_pdf_string(_lookup(_items(ref), "/JS"))
-                else:
-                    code = ""   # dangling reference: keep the entry as evidence
-                key = source
-            else:
-                source, code = oid, decode_pdf_string(value)
-                key = (oid, code)   # several inline scripts in one object stay distinct
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append({"object": oid, "objstm": obj.objstm, "source_object": source,
-                            "code": code})
+                        else decode_pdf_string(_lookup(_items(ref), "/JS")) \
+                        or _body_string(ref)
+                results.append({"object": oid, "objstm": obj.objstm, "copy": _copy(obj),
+                                "source_object": source, "source_copy": _copy(ref),
+                                "code": code, "data": data})
     return results
+
+
+def _body_string(obj: PdfObject) -> str:
+    """Decode an object whose whole body is a string (``5 0 obj (...) endobj``), else ''."""
+    return decode_pdf_string([tok[1] for tok in obj.element.content])
 
 
 def _js_values(items):
@@ -209,14 +259,14 @@ def _js_values(items):
 
 
 def find_actions(pdf: ParsedPdf) -> List[dict]:
-    """Find URI, SubmitForm, GoToR and Launch actions and their targets.
+    """Find URI, SubmitForm, GoToR, GoToE, Launch and ImportData actions and their targets.
 
     Returns:
-        Dicts ``{"object", "objstm", "type", "target"}``.
+        Dicts ``{"object", "objstm", "copy", "type", "target"}``.
     """
     results, seen = [], set()
-    for oid in sorted(pdf.objects):
-        obj = pdf.objects[oid]
+    for obj in _all(pdf):
+        oid = obj.id
         for d in _walk_dicts(_items(obj)):   # inline /A, /AA, /Next, arrays ...
             atype = _name(_lookup(d, "/S"))
             if atype not in ACTION_TYPES:
@@ -228,62 +278,97 @@ def find_actions(pdf: ParsedPdf) -> List[dict]:
             if (oid, atype, target) in seen:
                 continue
             seen.add((oid, atype, target))
-            results.append({"object": oid, "objstm": obj.objstm, "type": atype,
-                            "target": target})
+            results.append({"object": oid, "objstm": obj.objstm, "copy": _copy(obj),
+                            "type": atype, "target": target})
     return results
 
 
-def _trigger_action(pdf: ParsedPdf, items, target: Optional[int]) -> Optional[str]:
+def _active_action(d) -> Optional[str]:
+    """The dict's active action type, or None.
+
+    Any action with a ``/JS`` entry (e.g. ``/Rendition``) runs JavaScript, so
+    it counts as ``/JavaScript``.
+    """
+    atype = _name(_lookup(d, "/S"))
+    if atype in _ACTIVE_ACTIONS:
+        return atype
+    return "/JavaScript" if _lookup(d, "/JS") is not None else None
+
+
+def _trigger_action(pdf: ParsedPdf, items, target: Optional[int],
+                    chains: Dict[tuple, Optional[str]]) -> Optional[str]:
     """Return a trigger's action type, following its ``/Next`` chain.
 
-    The first active action (JavaScript, URI, SubmitForm, GoToR, Launch)
+    The first active action (JavaScript, URI, SubmitForm, GoToR, GoToE,
+    Launch, ImportData; any dict with a ``/JS`` entry counts as JavaScript)
     found in the action dict, its nested dicts or the ``/Next`` chain
     (dict, reference or array of either) wins; otherwise the action's own
-    ``/S``. A visited set stops reference loops.
+    ``/S``. A visited set stops reference loops. ``chains`` caches the
+    walk of referenced ``/Next`` objects, so the copies of one target that
+    share a chain walk it once.
     """
+    refs: List[int] = []
+    for d in _walk_dicts(items):
+        atype = _active_action(d)
+        if atype:
+            return atype
+        refs += ref_ids(_lookup(d, "/Next"))
+    key = (target, tuple(refs))
+    if key not in chains:
+        chains[key] = _chain_action(pdf, refs, target)
+    return chains[key] or _name(_lookup(items, "/S"))
+
+
+def _chain_action(pdf: ParsedPdf, refs: List[int], target: Optional[int]) -> Optional[str]:
+    """First active action reached through the referenced ``/Next`` objects, or None."""
     seen = {target} if target is not None else set()
-    todo = [items]
+    todo: list = []
+
+    def follow(rids):
+        for rid in rids:
+            if rid in pdf.objects and rid not in seen:
+                seen.add(rid)
+                todo.extend(_items(o) for o in pdf.objects[rid])
+    follow(refs)
     while todo:
         for d in _walk_dicts(todo.pop(0)):
-            atype = _name(_lookup(d, "/S"))
-            if atype in _ACTIVE_ACTIONS:
+            atype = _active_action(d)
+            if atype:
                 return atype
-            for rid in ref_ids(_lookup(d, "/Next")):
-                if rid in pdf.objects and rid not in seen:
-                    seen.add(rid)
-                    todo.append(_items(pdf.objects[rid]))
-    return _name(_lookup(items, "/S"))
+            follow(ref_ids(_lookup(d, "/Next")))
+    return None
 
 
-def _document_js(pdf: ParsedPdf, obj: PdfObject) -> List[Optional[int]]:
-    """Return where each document-level script lives (object id, or None if inline).
+def _document_js(pdf: ParsedPdf, obj: PdfObject) -> List[Optional[PdfObject]]:
+    """Return where each document-level script lives (the object copy, or None if inline).
 
     Walks the ``/Names`` -> ``/JavaScript`` name tree of a Catalog (inline
-    or referenced nodes, ``/Kids`` and ``/Names`` arrays). These scripts run
-    when the document opens.
+    or referenced nodes, ``/Kids`` and ``/Names`` arrays), following every
+    copy of a referenced node. These scripts run when the document opens.
     """
-    names, _ = _resolve(pdf, _lookup(_items(obj), "/Names"))
-    root = _lookup(names, "/JavaScript")
-    found: List[Optional[int]] = []
-    seen = set()
-    todo = [(root, None)]
+    found: List[Optional[PdfObject]] = []
+    keys, seen = set(), set()
+    todo = [(_lookup(names, "/JavaScript"), None)
+            for names, _ in _resolve(pdf, _lookup(_items(obj), "/Names"))]
     while todo:
-        value, oid = todo.pop(0)
-        if oid is None and not _is_dict(value):   # a reference or an array of them
+        value, node = todo.pop(0)
+        if node is None and not _is_dict(value):   # a reference or an array of them
             refs = ref_ids(value)
             value = None
         else:
             refs = []
         for d in _walk_dicts(value):
             if _lookup(d, "/JS") is not None or _name(_lookup(d, "/S")) == "/JavaScript":
-                if oid not in found:
-                    found.append(oid)
+                key = (node.id, node.copy) if node is not None else None
+                if key not in keys:
+                    keys.add(key)
+                    found.append(node)
                 continue
             refs += ref_ids(_lookup(d, "/Kids")) + ref_ids(_lookup(d, "/Names"))
         for rid in refs:
             if rid in pdf.objects and rid not in seen:
                 seen.add(rid)
-                todo.append((_items(pdf.objects[rid]), rid))
+                todo.extend((_items(o), o) for o in pdf.objects[rid])
     return found
 
 
@@ -291,33 +376,54 @@ def find_triggers(pdf: ParsedPdf) -> List[dict]:
     """Find ``/OpenAction``, ``/AA`` and document-level JavaScript triggers.
 
     Returns:
-        Dicts ``{"object", "objstm", "keyword", "action", "target_object"}``.
+        Dicts ``{"object", "objstm", "copy", "keyword", "action",
+        "target_object", "target_copy"}``, one per followed copy of a
+        referenced target. ``target_copy`` is that copy's number when the
+        target id has several copies, else None.
         ``action`` is the ``/S`` name (or the first active action in its
         ``/Next`` chain), or None for a destination array. ``/AA`` yields one
         dict per sub-entry. JavaScript in the Catalog's ``/Names`` ->
         ``/JavaScript`` tree yields ``keyword`` ``/Names`` and ``action``
         ``/JavaScript``, one dict per script location.
+
+        A value repeated across copies of the same object (or of an ``/AA``
+        container) is followed once, by its first copy. Otherwise every copy
+        multiplies the next level's copies and a small hostile file yields
+        millions of results.
     """
-    results = []
-    for oid in sorted(pdf.objects):
-        obj = pdf.objects[oid]
+    results, done = [], set()
+    chains: Dict[tuple, Optional[str]] = {}
+
+    def first(key) -> bool:
+        if key in done:
+            return False
+        done.add(key)
+        return True
+
+    for obj in _all(pdf):
+        base = {"object": obj.id, "objstm": obj.objstm, "copy": _copy(obj)}
         for keyword in ("/OpenAction", "/AA"):
             value = obj.get(keyword)
-            if value is None:
+            if value is None or not first((obj.id, keyword, _value_key(value))):
                 continue
             if keyword == "/OpenAction":
                 entries = [value]
             else:
-                container, _ = _resolve(pdf, value)
-                entries = [v for _, v in container] if container else []
+                entries = [v for container, _ in _resolve(pdf, value) for _, v in container
+                           if first((obj.id, keyword, "entry", _value_key(v)))]
             for entry in entries:
-                items, target = _resolve(pdf, entry)
-                action = _trigger_action(pdf, items, target) if items is not None else None
-                results.append({"object": oid, "objstm": obj.objstm, "keyword": keyword,
-                                "action": action, "target_object": target})
-        for target in _document_js(pdf, obj):
-            results.append({"object": oid, "objstm": obj.objstm, "keyword": "/Names",
-                            "action": "/JavaScript", "target_object": target})
+                for items, target in _resolve(pdf, entry) or [(None, None)]:
+                    tid = target.id if target is not None else None
+                    action = _trigger_action(pdf, items, tid, chains) if items is not None else None
+                    results.append(dict(base, keyword=keyword, action=action,
+                                        target_object=tid, target_copy=_copy(target)))
+        names = obj.get("/Names")
+        if names is None or not first((obj.id, "/Names", _value_key(names))):
+            continue
+        for node in _document_js(pdf, obj):
+            results.append(dict(base, keyword="/Names", action="/JavaScript",
+                                target_object=node.id if node is not None else None,
+                                target_copy=_copy(node)))
     return results
 
 
@@ -325,56 +431,99 @@ def find_embedded_files(pdf: ParsedPdf) -> List[dict]:
     """Find embedded file streams (``/Type /EmbeddedFile`` or filespec ``/EF``).
 
     Filespecs are found at any depth (e.g. inline in a ``/Names`` array).
+    Every copy of an ``/EF`` target is returned, but when there are several
+    only the copies that look like an attachment get the filespec name (see
+    ``_attachment_copies``); the others have name None.
 
     Returns:
-        Dicts ``{"object", "objstm", "name", "data"}``.
+        Dicts ``{"object", "objstm", "copy", "name", "data"}``.
     """
-    names: Dict[int, Optional[str]] = {}
-    for oid in sorted(pdf.objects):
-        for d in _walk_dicts(_items(pdf.objects[oid])):
+    targets: Set[Tuple[int, int]] = set()              # (id, copy) of every /EF target
+    names: Dict[Tuple[int, int], Optional[str]] = {}   # (id, copy) -> filespec name
+    for obj in _all(pdf):
+        for d in _walk_dicts(_items(obj)):
             ef = _lookup(d, "/EF")
             if ef is None:
                 continue
             name = _filespec_name(pdf, [("/UF", _lookup(d, "/UF")), ("/F", _lookup(d, "/F"))])
-            ef_items, _ = _resolve(pdf, ef)
-            for _, v in ef_items or []:
-                for sid in ref_ids(v):
-                    names.setdefault(sid, name)
+            for ef_items, _ in _resolve(pdf, ef):
+                for _, v in ef_items:
+                    for sid in ref_ids(v):
+                        copies = pdf.objects.get(sid, [])
+                        targets.update((o.id, o.copy) for o in copies)
+                        for o in _attachment_copies(copies):
+                            names.setdefault((o.id, o.copy), name)
     results = []
-    for oid in sorted(pdf.objects):
-        obj = pdf.objects[oid]
-        if oid not in names and not pdf_parser.EqualCanonical(obj.type(), "/EmbeddedFile"):
+    for obj in _all(pdf):
+        key = (obj.id, obj.copy)
+        if key not in targets and not pdf_parser.EqualCanonical(obj.type(), "/EmbeddedFile"):
             continue
         data = obj.stream()
         if data is None:
             continue
-        results.append({"object": oid, "objstm": obj.objstm, "name": names.get(oid),
-                        "data": data})
+        results.append({"object": obj.id, "objstm": obj.objstm, "copy": _copy(obj),
+                        "name": names.get(key), "data": data})
     return results
 
 
+def _attachment_copies(copies: List[PdfObject]) -> List[PdfObject]:
+    """Of several copies, those that look like an attachment; all if none does.
+
+    A copy is ruled out by a ``/Type`` other than ``/EmbeddedFile`` or an
+    image or form ``/Subtype``. A single copy is always kept.
+    """
+    if len(copies) < 2:
+        return copies
+    looks = [o for o in copies
+             if (not o.type() or pdf_parser.EqualCanonical(o.type(), "/EmbeddedFile"))
+             and _name(o.get("/Subtype")) not in ("/Image", "/Form")]
+    return looks or copies
+
+
 def find_keywords(pdf: ParsedPdf) -> Dict[str, List[int]]:
-    """Map ``/RichMedia``, ``/ObjStm`` and ``/XObject`` to the objects containing them."""
-    out = {"/RichMedia": [], "/ObjStm": [], "/XObject": []}
-    for oid in sorted(pdf.objects):
+    """Map ``/RichMedia``, ``/XFA``, ``/ObjStm`` and ``/XObject`` to the objects containing them."""
+    out = {"/RichMedia": [], "/XFA": [], "/ObjStm": [], "/XObject": []}
+    for obj in _all(pdf):
         for name in out:
-            if pdf.objects[oid].has_name(name):
-                out[name].append(oid)
+            # Ids come in order, so a repeat can only be the last one added.
+            if obj.has_name(name) and out[name][-1:] != [obj.id]:
+                out[name].append(obj.id)
     return out
 
 
 def find_richmedia_streams(pdf: ParsedPdf) -> List[dict]:
     """Return streams referenced one level deep from ``/RichMedia`` objects."""
     results, seen = [], set()
-    for oid in sorted(pdf.objects):
-        if not pdf.objects[oid].has_name("/RichMedia"):
+    for obj in _all(pdf):
+        if not obj.has_name("/RichMedia"):
             continue
-        for rid in pdf.objects[oid].refs():
-            if rid in seen or rid == oid or rid not in pdf.objects:
+        for rid in obj.refs():
+            if rid == obj.id or rid not in pdf.objects:
                 continue
-            data = pdf.objects[rid].stream()
-            if data is None:
-                continue
-            seen.add(rid)
-            results.append({"object": rid, "objstm": pdf.objects[rid].objstm, "data": data})
+            for ref in pdf.objects[rid]:
+                if (rid, ref.copy) in seen:
+                    continue
+                data = ref.stream()
+                if data is None:
+                    continue
+                seen.add((rid, ref.copy))
+                results.append({"object": rid, "objstm": ref.objstm, "copy": _copy(ref),
+                                "data": data})
+    return results
+
+
+def find_duplicates(pdf: ParsedPdf) -> List[dict]:
+    """Find object ids defined more than once.
+
+    Returns:
+        Dicts ``{"object", "count", "active"}``; ``active`` lists the names
+        from ``DUPLICATE_ACTIVE_NAMES`` found in any copy.
+    """
+    results = []
+    for oid in sorted(pdf.objects):
+        copies = pdf.objects[oid]
+        if len(copies) < 2:
+            continue
+        active = [n for n in DUPLICATE_ACTIVE_NAMES if any(o.has_name(n) for o in copies)]
+        results.append({"object": oid, "count": len(copies), "active": active})
     return results

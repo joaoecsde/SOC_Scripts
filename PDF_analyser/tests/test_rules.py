@@ -121,7 +121,7 @@ class RulesTests(unittest.TestCase):
 
     def test_finding_keys(self):
         f = rules.evaluate(facts(javascript=[js("x")]))
-        self.assertEqual(set(f[0]), {"severity", "keyword", "object", "objstm",
+        self.assertEqual(set(f[0]), {"severity", "keyword", "object", "objstm", "copy",
                                      "finding", "preview", "markers", "target"})
 
 

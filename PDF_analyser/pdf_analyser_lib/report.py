@@ -74,6 +74,8 @@ def render(result: dict, colors: Colors) -> str:
         lines.append(f"  {c.GREEN}No suspicious indicators found{c.RESET}")
     for f in sorted(result["findings"], key=lambda x: _SEV_ORDER.get(x["severity"], 9)):
         where = f"obj {f['object']}"
+        if f.get("copy") is not None:
+            where += f", copy {f['copy']}"
         if f.get("objstm") is not None:
             where += f" (in ObjStm {f['objstm']})"
         lines.append(f"  {_sev_color(c, f['severity'])}{f['severity'].upper():<6}{c.RESET} "

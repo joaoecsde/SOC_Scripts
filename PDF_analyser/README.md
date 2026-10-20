@@ -15,9 +15,9 @@ A Python tool that triages a suspicious **PDF** without opening it. It looks for
 
 - JavaScript (`/JS`, `/JavaScript`), including scripts inside object streams and hex-escaped names such as `/J#53`
 - Automatic triggers: `/OpenAction` (following its `/Next` chain), `/AA` (additional actions) and document-level JavaScript in the Catalog `/Names` tree
-- Actions: `/URI`, `/Launch`, `/SubmitForm`, `/GoToR`
+- Actions: `/URI`, `/Launch`, `/SubmitForm`, `/GoToR`, `/GoToE`, `/ImportData`
 - Embedded files (`/EmbeddedFile`), including executables and scripts by name or by `MZ` / `#!` prefix
-- Rich media (`/RichMedia`)
+- Rich media (`/RichMedia`) and XFA forms (`/XFA`)
 - Obfuscation markers in JavaScript: `eval`, `unescape`, `String.fromCharCode`, `%u` shellcode, long hex strings, heavy string building
 - Encrypted or malformed files: the report says when parsing was partial or the verdict may be understated
 
@@ -27,16 +27,19 @@ A Python tool that triages a suspicious **PDF** without opening it. It looks for
 
 | Level | Finding |
 |---|---|
-| HIGH | JavaScript (or a `/Launch`, `/URI`, `/SubmitForm`, `/GoToR` action) that runs automatically: from `/OpenAction` (including its `/Next` chain), an `/AA` document event, or document-level JavaScript in the Catalog `/Names` tree |
+| HIGH | JavaScript (any action with a `/JS` entry, e.g. `/Rendition`) or a `/Launch`, `/URI`, `/SubmitForm`, `/GoToR`, `/GoToE`, `/ImportData` action that runs automatically: from `/OpenAction` (including its `/Next` chain), an `/AA` document event, or document-level JavaScript in the Catalog `/Names` tree |
 | HIGH | JavaScript with obfuscation markers |
 | HIGH | Embedded executable or script file |
-| HIGH | `/SubmitForm` or `/GoToR` to an external target |
+| HIGH | `/SubmitForm`, `/GoToR` or `/GoToE` to an external target |
 | MEDIUM | Plain JavaScript, or JavaScript that could not be resolved |
 | MEDIUM | Embedded (non-executable) file |
-| MEDIUM | `/Launch`, `/RichMedia`, local `/SubmitForm` or `/GoToR` |
+| MEDIUM | `/Launch`, `/ImportData`, `/RichMedia`, `/XFA` form, local `/SubmitForm`, `/GoToR` or `/GoToE` |
+| MEDIUM | An object number defined more than once where a copy holds active content (`/JS`, `/JavaScript`, `/Launch`, `/SubmitForm`, `/GoToR`, `/GoToE`, `/ImportData`, `/EmbeddedFile`) |
 | LOW | Nothing above |
 
-Informational only (listed, never raise the verdict): `/ObjStm`, `/XObject`, `/URI` links that only open when the reader clicks them (for example a link annotation), and triggers with no active action (for example `/OpenAction` going to a page, which is how most normal PDFs open). A `/URI` action that runs automatically from `/OpenAction` or `/AA` is HIGH (first row above).
+Informational only (listed, never raise the verdict): `/ObjStm`, `/XObject`, an object number defined more than once with no active content (normal after an editor saves incrementally), `/URI` links that only open when the reader clicks them (for example a link annotation), and triggers with no active action (for example `/OpenAction` going to a page, which is how most normal PDFs open). A `/URI` action that runs automatically from `/OpenAction` or `/AA` is HIGH (first row above).
+
+Every copy of a repeated object number is analysed. A PDF reader picks one copy through the xref table, which a crafted file can point at an earlier copy than the last one, so no copy is skipped. A reference `N G R` follows every copy of N whatever its generation number, because readers may ignore a mismatch. When an attachment's object has several copies, every copy is extracted, but only copies that look like an attachment get its file name. Findings and extracted file names say which copy they came from: `obj 5, copy 1` and `obj5_copy1_javascript.js.txt` for the object itself, `(obj 5, copy 1)` on a trigger that reached that copy, and `(script in obj 3, copy 1)` / `obj2_javascript_from_obj3_copy1.js.txt` for a script stored in another object.
 
 The verdict is a **heuristic**. Always confirm manually before closing or escalating a case.
 

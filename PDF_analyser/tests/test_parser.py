@@ -34,14 +34,14 @@ class ParserTests(unittest.TestCase):
 
     def test_stream_is_decoded(self):
         pdf = _load(pdfgen.make_pdf({1: pdfgen.stream_obj("", b"hello")}))
-        self.assertEqual(pdf.objects[1].stream(), b"hello")
-        self.assertIsNone(_load(pdfgen.make_pdf({1: "<< /A 1 >>"})).objects[1].stream())
+        self.assertEqual(pdf.objects[1][0].stream(), b"hello")
+        self.assertIsNone(_load(pdfgen.make_pdf({1: "<< /A 1 >>"})).objects[1][0].stream())
 
     def test_objstm_children_are_loaded(self):
         pdf = _load(pdfgen.make_pdf({5: pdfgen.objstm_obj({10: "<< /S /JavaScript /JS (x) >>"})}))
-        self.assertEqual(pdf.objects[10].objstm, 5)
-        self.assertTrue(pdf.objects[10].has_name("/JS"))
-        self.assertIsNone(pdf.objects[5].objstm)
+        self.assertEqual(pdf.objects[10][0].objstm, 5)
+        self.assertTrue(pdf.objects[10][0].has_name("/JS"))
+        self.assertIsNone(pdf.objects[5][0].objstm)
 
     def test_encrypted_flagged(self):
         pdf = _load(pdfgen.make_pdf({1: "<< /A 1 >>"}, trailer="<< /Root 1 0 R /Encrypt 9 0 R >>"))
@@ -61,13 +61,26 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(pdf.partial)
         self.assertTrue(pdf.errors)
 
-    def test_last_definition_wins(self):
+    def test_every_copy_is_kept_in_file_order(self):
         pdf = _load(pdfgen.make_pdf({1: "<< /A 1 >>"}) + b"1 0 obj\n<< /Marker true >>\nendobj\n")
-        self.assertTrue(pdf.objects[1].has_name("/Marker"))
+        copies = pdf.objects[1]
+        self.assertEqual([o.copy for o in copies], [1, 2])
+        self.assertFalse(copies[0].has_name("/Marker"))
+        self.assertTrue(copies[1].has_name("/Marker"))
+        self.assertTrue(copies[0].duplicated)
+
+    def test_single_object_is_not_duplicated(self):
+        pdf = _load(pdfgen.make_pdf({1: "<< /A 1 >>"}))
+        self.assertFalse(pdf.objects[1][0].duplicated)
+
+    def test_objstm_copy_counts_as_copy(self):
+        pdf = _load(pdfgen.make_pdf([(6, "<< /A 1 >>"),
+                                     (5, pdfgen.objstm_obj({6: "<< /S /JavaScript /JS (x) >>"}))]))
+        self.assertEqual([(o.copy, o.objstm) for o in pdf.objects[6]], [(1, None), (2, 5)])
 
     def test_helpers(self):
         pdf = _load(pdfgen.make_pdf({1: "<< /Type /Catalog /Pages 2 0 R >>"}))
-        obj = pdf.objects[1]
+        obj = pdf.objects[1][0]
         self.assertEqual(obj.type(), "/Catalog")
         self.assertEqual(obj.refs(), [2])
         self.assertEqual("".join(obj.get("/Pages")).strip(), "2 0 R")
