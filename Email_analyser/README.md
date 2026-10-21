@@ -1,22 +1,39 @@
-# Phishing Email Header Analyser
+# Phishing Email Header Analyser (v2)
 
-A Python script that analyses the **headers, attachments and links** of a suspicious email and gives a **risk score** with the reasons behind it. It works **offline by default**, so no API keys are needed. An optional `--online` flag checks the extracted IPs against [AbuseIPDB](https://www.abuseipdb.com) and attachment hashes against [VirusTotal](https://www.virustotal.com).
+A Python tool that analyses the **headers, links and attachments** of a suspicious email and gives a **risk score** with the reasons behind it. It works **offline by default**. An optional `--online` flag checks IPs against [AbuseIPDB](https://www.abuseipdb.com) and attachment hashes against [VirusTotal](https://www.virustotal.com).
+
+Version 2 splits the analysis into the `email_analyser_lib` package and fixes the false positives and blind spots of v1 (see below). The command-line options are the same as v1, so existing commands keep working.
+
+---
+
+## What changed from v1
+
+| Area | v1 | v2 |
+|---|---|---|
+| Structure | One 550-line file | Short entry script + `email_analyser_lib` package, one module per stage |
+| Brand lookalikes | `secure-paypal.com` passed as genuine | Compared against each brand's real domains |
+| Newsletters | Legit Mailchimp mail scored MEDIUM (40) | DMARC-verified third-party senders are noted as info (0) |
+| DKIM | Only the first signature checked | Every signature checked; any aligned pass counts |
+| Message-ID | Google Workspace / Microsoft 365 flagged | Known mail providers ignored |
+| Links | Listed, never scored | Scored: text/href mismatch, `@` trick, IP links, forms, lookalikes, shorteners, risky downloads |
+| Link extraction | Regex over raw HTML (`&amp;`, `w3.org` noise) | Real HTML parsing; Microsoft Safe Links and Google redirects unwrapped |
+| Display name | "John @ Home" = +25 | Only real `user@domain.tld` addresses count |
+| Attached emails | Hashed as empty files | Hashed properly, summarised, and searched for files inside |
+| Input | `.msg`, PDFs, blank-line files silently analysed as empty | Detected with a clear message; leading blank lines fixed |
+| Terminal safety | Headers printed raw (escape codes) | Control characters removed; everything defanged |
+| Errors | Python tracebacks | Clean messages, exit code 3 |
+| Score | One problem could max the score | Each category is capped |
+| IPs | IPv4 only | IPv4 and IPv6 |
 
 ---
 
 ## Requirements
 
-- Python 3.x
-- `requests` library
-
----
-
-## Installation
-
-Only needed if you plan to use `--online`. Open a terminal and run:
+- Python 3.8 or newer
+- `requests`, only for `--online`:
 
 ```bash
-py -m pip install requests
+python3 -m pip install requests
 ```
 
 ---
@@ -27,8 +44,6 @@ py -m pip install requests
 |---|---|
 | AbuseIPDB | [abuseipdb.com](https://www.abuseipdb.com) → Account → API → Create Key |
 | VirusTotal | [virustotal.com](https://www.virustotal.com) → Profile → API Key |
-
-### Add your keys to the shared keys file
 
 Open `api_keys.py` in the main folder and paste your keys between the quotes:
 
@@ -45,76 +60,38 @@ You can also use environment variables (`ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY
 
 | Source | What to do |
 |---|---|
-| Outlook | Open the email → File → Save As → `.eml` (or drag it to the desktop) |
+| New Outlook / Outlook on the web | Open the email → **...** → Save / Download (`.eml`) |
+| Classic Outlook (Windows) | Save As gives a `.msg`, which is **not supported**. Use File → Properties and copy the **Internet headers** into a `.txt` file, or use Outlook on the web |
 | Gmail | Open the email → ⋮ menu → **Download message** |
 | Headers only | Copy the raw headers ("Show original" / "View message source") into a `.txt` file |
 
-A full `.eml` file is best, because it also lets the script inspect attachments and links.
+A full `.eml` file is best, because it also lets the tool check links and attachments.
 
 ---
 
 ## Running the Script
 
-### Analyse an email file
+Run it from the `Email_analyser` folder (the script finds its package next to it).
+
 ```bash
-python email_header_analyser.py suspicious.eml
+python3 email_header_analyser.py suspicious.eml
+python3 email_header_analyser.py headers.txt
+cat headers.txt | python3 email_header_analyser.py -
+python3 email_header_analyser.py suspicious.eml --online --json results.json
 ```
 
-### Analyse raw headers saved in a text file
+### Use in scripts
+
 ```bash
-python email_header_analyser.py headers.txt
+python3 email_header_analyser.py suspicious.eml --exit-code
 ```
 
-### Pipe headers in from another command
-```bash
-cat headers.txt | python email_header_analyser.py -
-```
-
-### Add online checks (AbuseIPDB and VirusTotal)
-```bash
-python email_header_analyser.py suspicious.eml --online
-```
-
-### Save results to JSON
-```bash
-python email_header_analyser.py suspicious.eml --json results.json
-```
-
-You can combine any of these:
-```bash
-python email_header_analyser.py suspicious.eml --online --json results.json
-```
-
----
-
-## What It Checks
-
-| Section | What the script does |
+| Exit code | Meaning |
 |---|---|
-| Key headers | Extracts From, Reply-To, Return-Path, To, Subject, Date, Message-ID, X-Mailer and the originating IP |
-| Received chain | Rebuilds the delivery path from oldest to newest hop, with IPs, hostnames, timestamps and delays |
-| Authentication | Reads SPF, DKIM and DMARC results, and checks that the signing/envelope domains match the From domain |
-| Spoofing detection | Looks for Reply-To / Return-Path / Message-ID mismatches, brand impersonation in the display name, lookalike or punycode domains, suspicious TLDs and bulk-mail clients |
-| Indicators | Collects IPs, domains and URLs, all shown **defanged** so they are safe to copy |
-| Attachments | Calculates MD5, SHA1 and SHA256, and flags risky or double extensions and disguised executables |
-| Risk score | Adds up points for each finding and gives a verdict |
-| Report | Colour-coded terminal report, plus optional JSON export |
-
-Attachments are only hashed and inspected as bytes. They are **never opened or executed**.
-
----
-
-## Risk Score
-
-Each finding adds points to the total (capped at 100):
-
-| Score | Verdict |
-|---|---|
-| 0 – 29 | 🟢 **LOW** risk |
-| 30 – 59 | 🟡 **MEDIUM** risk |
-| 60 – 100 | 🔴 **HIGH** risk |
-
-The score is a **heuristic**. Always confirm the findings manually before closing or escalating a case.
+| 0 | Finished (LOW verdict when `--exit-code` is used) |
+| 1 | MEDIUM verdict (`--exit-code` only) |
+| 2 | HIGH verdict (`--exit-code` only) |
+| 3 | Error: file missing, not an email, `.msg`, JSON not writable... |
 
 ---
 
@@ -124,46 +101,93 @@ The score is a **heuristic**. Always confirm the findings manually before closin
 |---|---|---|
 | `input` | Path to a `.eml` or headers file, or `-` for stdin | required |
 | `--online` | Also check public IPs (AbuseIPDB) and attachment hashes (VirusTotal) | off |
-| `--abusekey` | AbuseIPDB API key (if not hardcoded) | — |
-| `--vtkey` | VirusTotal API key (if not hardcoded) | — |
-| `--json` | Save results to a JSON file | — |
+| `--abusekey` | AbuseIPDB API key | from env / `api_keys.py` |
+| `--vtkey` | VirusTotal API key | from env / `api_keys.py` |
+| `--json` | Save full results to a JSON file (raw values, not defanged) | — |
 | `--delay` | Seconds between VirusTotal calls when using `--online` | `15` |
+| `--exit-code` | Exit with 0/1/2 for LOW/MEDIUM/HIGH | off |
+| `--version` | Show the version | — |
 
 ---
 
-## Output Colors
+## What It Checks
 
-- 🟢 **Green**: Passed / clean
-- 🟡 **Yellow**: Suspicious / medium finding
-- 🔴 **Red**: Failed / high risk finding
-- ⚪ **Gray**: Missing or low importance
-
----
-
-## API Rate Limits (`--online` only)
-
-| Service | Free tier limit |
+| Category (cap) | Checks |
 |---|---|
-| AbuseIPDB | 1,000 requests / day |
-| VirusTotal | 4 requests / minute |
+| Authentication (45) | SPF, every DKIM signature, DMARC; SPF/DKIM alignment with From when DMARC did not pass |
+| Sender (40) | Reply-To, Return-Path and Message-ID vs From; missing Message-ID / Date. Collapsed into one info note when DMARC passes |
+| Impersonation (50) | Address in display name, brand in display name, lookalike / digit-swapped / punycode From domains, suspicious TLDs |
+| Relay (20) | Missing Received headers, long chains, big delays, timestamps going backwards, no public origin IP |
+| Mailer (10) | Bulk-mail / script X-Mailer |
+| Links (40) | Text shows one domain but links to another, `@` in URL, bare-IP links, HTML forms, lookalike / punycode link domains, shorteners, suspicious TLDs, direct downloads of risky files |
+| Attachments (60) | Risky / double extensions, hidden RTL characters, renamed executables (MZ), HTML/SVG with forms or smuggling code, files inside attached emails |
+| Reputation (50) | `--online` only: AbuseIPDB score, VirusTotal detections |
 
-The default `--delay` of 15 seconds keeps you under the VirusTotal limit when an email has several attachments.
+Attachments are only hashed and inspected as bytes. They are **never opened or executed**.
 
 ---
 
-## Troubleshooting
+## Risk Score
 
-**"No Received headers found"**
-The headers may have been stripped or copied incompletely. Try saving the email as a full `.eml` file.
+Each finding adds points. Each category is capped (numbers above), then the total is capped at 100.
 
-**"No Authentication-Results header present"**
-Some mail systems don't add this header, or it was removed when the email was forwarded. SPF, DKIM and DMARC can't be verified in that case.
+| Score | Verdict |
+|---|---|
+| 0 – 29 | 🟢 **LOW** risk |
+| 30 – 59 | 🟡 **MEDIUM** risk |
+| 60 – 100 | 🔴 **HIGH** risk |
 
-**"Hash not found in VirusTotal" (with `--online`)**
-The file hasn't been submitted to VirusTotal before. This is normal for new or targeted malware, so it doesn't mean the file is safe.
+`INFO` findings (0 points) give context, such as "sent through Mailchimp, DMARC passed".
 
-**HTTP 401 error (with `--online`)**
-Your API key is incorrect or not set. Check the key in the script or pass it with `--abusekey` / `--vtkey`.
+The score is a **heuristic**. Always confirm the findings manually before closing or escalating a case.
 
-**HTTP 429 error (with `--online`)**
-You've hit the rate limit. Wait a minute and try again, or increase `--delay`.
+---
+
+## Tuning
+
+All lists live in `email_analyser_lib/config.py`: brands and their real domains, free-mail providers, mail providers, email service providers, suspicious TLDs, link shorteners, risky extensions, category caps and verdict thresholds. Add the brands, banks and suppliers relevant to your organisation to `BRAND_DOMAINS`.
+
+---
+
+## File Layout
+
+```
+Email_analyser/
+├── email_header_analyser.py          command line only
+├── email_analyser_lib/
+│   ├── config.py        lists and scoring settings
+│   ├── utils.py         defang, domains, brands, IPs, safe printing
+│   ├── loader.py        input reading and validation
+│   ├── headers.py       key headers, Received chain, origin IP
+│   ├── auth.py          SPF / DKIM / DMARC and alignment
+│   ├── links.py         link extraction and checks
+│   ├── attachments.py   hashing and static checks
+│   ├── rules.py         findings and scoring
+│   ├── online.py        AbuseIPDB / VirusTotal
+│   ├── pipeline.py      runs every stage in order
+│   └── report.py        terminal report and JSON
+└── tests/
+    └── test_email_header_analyser.py
+```
+
+---
+
+## Tests
+
+From the `Email_analyser` folder:
+
+```bash
+python3 -m unittest discover tests -v
+```
+
+The tests build sample emails in memory (no files or network needed). Run them after changing any rule or list, to check that clean mail stays clean and phishing is still caught.
+
+---
+
+## Known Limitations
+
+- `.msg` files are not supported (save as `.eml` or copy the headers).
+- `root_domain()` is a heuristic, not the full Public Suffix List. Shared hosting such as `*.github.io` is treated as one organisation.
+- Only Microsoft Safe Links and Google redirect links are unwrapped. Other gateways (e.g. Proofpoint URL Defense) show the gateway's domain.
+- A display name like "Microsoft Outlook" on internal Exchange system messages is flagged as brand impersonation.
+- Authentication-Results is only trustworthy when your own mail server added it.

@@ -1,3 +1,6 @@
 api_keys.py
 __pycache__/
 .DS_Store
+
+*.eml
+pdf-analysis-results/
