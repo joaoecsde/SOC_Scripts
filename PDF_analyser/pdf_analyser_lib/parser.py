@@ -7,14 +7,16 @@ parse was partial. Nothing in the file is ever executed.
 """
 from __future__ import annotations
 
-import sys
+import importlib.util
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
-import pdf_parser  # noqa: E402
+_VENDOR_PARSER = Path(__file__).resolve().parent.parent / "vendor" / "pdf_parser.py"
+_spec = importlib.util.spec_from_file_location("pdf_parser", _VENDOR_PARSER)
+pdf_parser = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(pdf_parser)
 
 
 @dataclass
