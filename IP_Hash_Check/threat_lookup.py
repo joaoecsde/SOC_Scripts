@@ -106,6 +106,17 @@ GREEN  = "\033[92m"
 CYAN   = "\033[96m"
 GRAY   = "\033[90m"
 
+# Text from the APIs and the indicator file can contain terminal escape codes
+# (VirusTotal file names are chosen by whoever uploaded the file). Control
+# characters become "?" and invisible / right-to-left characters are shown
+# as <U+XXXX>, so nothing can recolour or rewrite the output.
+_BIDI_INVISIBLE = re.compile("[​-‏‪-‮⁦-⁩﻿]")
+_CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
+def safe(value) -> str:
+    text = _BIDI_INVISIBLE.sub(lambda m: f"<U+{ord(m.group()):04X}>", str(value))
+    return _CONTROL.sub("?", text)
+
 def color_score(score: Optional[int], thresholds=(25, 75)) -> str:
     if score is None:
         return f"{GRAY}N/A{RESET}"
@@ -121,20 +132,20 @@ def print_ip_result(ip: str, result: dict) -> None:
     print(f"{'─'*60}")
 
     if "error" in result:
-        print(f"  {RED}Error: {result['error']}{RESET}")
+        print(f"  {RED}Error: {safe(result['error'])}{RESET}")
         return
 
     score = result.get("abuse_score")
     print(f"  Abuse Score     : {color_score(score)} / 100")
-    print(f"  Total Reports   : {result.get('total_reports', 'N/A')}")
-    print(f"  Distinct Users  : {result.get('distinct_users', 'N/A')}")
-    print(f"  Country         : {result.get('country', 'N/A')}")
-    print(f"  ISP             : {result.get('isp', 'N/A')}")
-    print(f"  Domain          : {result.get('domain', 'N/A')}")
-    print(f"  Usage Type      : {result.get('usage_type', 'N/A')}")
-    print(f"  Is Tor          : {result.get('is_tor', 'N/A')}")
-    print(f"  Whitelisted     : {result.get('is_whitelisted', 'N/A')}")
-    print(f"  Last Reported   : {result.get('last_reported', 'N/A')}")
+    print(f"  Total Reports   : {safe(result.get('total_reports', 'N/A'))}")
+    print(f"  Distinct Users  : {safe(result.get('distinct_users', 'N/A'))}")
+    print(f"  Country         : {safe(result.get('country', 'N/A'))}")
+    print(f"  ISP             : {safe(result.get('isp', 'N/A'))}")
+    print(f"  Domain          : {safe(result.get('domain', 'N/A'))}")
+    print(f"  Usage Type      : {safe(result.get('usage_type', 'N/A'))}")
+    print(f"  Is Tor          : {safe(result.get('is_tor', 'N/A'))}")
+    print(f"  Whitelisted     : {safe(result.get('is_whitelisted', 'N/A'))}")
+    print(f"  Last Reported   : {safe(result.get('last_reported', 'N/A'))}")
 
 def print_hash_result(hash_val: str, result: dict) -> None:
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
@@ -142,7 +153,7 @@ def print_hash_result(hash_val: str, result: dict) -> None:
     print(f"{'─'*60}")
 
     if "error" in result:
-        print(f"  {RED}Error: {result['error']}{RESET}")
+        print(f"  {RED}Error: {safe(result['error'])}{RESET}")
         return
 
     malicious  = result.get("malicious", 0)
@@ -159,19 +170,19 @@ def print_hash_result(hash_val: str, result: dict) -> None:
 
     print(f"  Detection       : {detection_str} engines flagged as malicious")
     print(f"  Suspicious      : {suspicious}")
-    print(f"  Name            : {result.get('meaningful_name', 'N/A')}")
-    print(f"  File Type       : {result.get('file_type', 'N/A')}")
-    print(f"  File Size       : {result.get('file_size', 'N/A')} bytes")
-    print(f"  SHA256          : {result.get('hash_sha256', 'N/A')}")
-    print(f"  SHA1            : {result.get('hash_sha1', 'N/A')}")
-    print(f"  MD5             : {result.get('hash_md5', 'N/A')}")
+    print(f"  Name            : {safe(result.get('meaningful_name', 'N/A'))}")
+    print(f"  File Type       : {safe(result.get('file_type', 'N/A'))}")
+    print(f"  File Size       : {safe(result.get('file_size', 'N/A'))} bytes")
+    print(f"  SHA256          : {safe(result.get('hash_sha256', 'N/A'))}")
+    print(f"  SHA1            : {safe(result.get('hash_sha1', 'N/A'))}")
+    print(f"  MD5             : {safe(result.get('hash_md5', 'N/A'))}")
     known_names = result.get("file_names", [])
     if known_names:
-        print(f"  Known Names     : {', '.join(known_names)}")
-    print(f"  Times Submitted : {result.get('times_submitted', 'N/A')}")
-    print(f"  First Seen      : {result.get('first_submission', 'N/A')}")
-    print(f"  Last Seen       : {result.get('last_submission', 'N/A')}")
-    print(f"  VT Link         : {result.get('vt_link', 'N/A')}")
+        print(f"  Known Names     : {', '.join(safe(n) for n in known_names)}")
+    print(f"  Times Submitted : {safe(result.get('times_submitted', 'N/A'))}")
+    print(f"  First Seen      : {safe(result.get('first_submission', 'N/A'))}")
+    print(f"  Last Seen       : {safe(result.get('last_submission', 'N/A'))}")
+    print(f"  VT Link         : {safe(result.get('vt_link', 'N/A'))}")
 
 
 # ── JSON output ────────────────────────────────────────────────────────────────
@@ -263,7 +274,7 @@ Examples:
             all_results.append({"type": "hash", "indicator": indicator, "result": result})
 
         else:
-            print(f"\n{YELLOW}Skipping '{indicator}' — not a valid IPv4 address or MD5/SHA1/SHA256 hash{RESET}")
+            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — not a valid IPv4 address or MD5/SHA1/SHA256 hash{RESET}")
             all_results.append({"type": "unknown", "indicator": indicator, "result": {"error": "Unrecognised format"}})
 
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
