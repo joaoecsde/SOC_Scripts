@@ -87,6 +87,9 @@ class RulesTests(unittest.TestCase):
             self.assertEqual(f[0]["keyword"], "/EmbeddedFile")
         self.assertTrue(rules.is_executable("X.PS1", b""))
         self.assertTrue(rules.is_executable(None, b"#!/bin/sh"))
+        # Windows drops trailing dots and spaces when saving.
+        self.assertTrue(rules.is_executable("payload.exe.", b""))
+        self.assertTrue(rules.is_executable("payload.exe . ", b""))
 
     def test_text_embedded_medium(self):
         f = rules.evaluate(facts(embedded=[{"object": 4, "objstm": None,

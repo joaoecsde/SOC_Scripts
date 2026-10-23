@@ -33,10 +33,13 @@ def js_markers(code: str) -> List[str]:
 
 
 def is_executable(name: Optional[str], data: bytes) -> bool:
-    """True for an ``MZ`` or ``#!`` prefix, or a name with an executable extension."""
+    """True for an ``MZ`` or ``#!`` prefix, or a name with an executable extension.
+
+    Trailing dots and spaces are ignored: Windows drops them when saving.
+    """
     if data[:2] in (b"MZ", b"#!"):
         return True
-    return bool(name) and name.lower().endswith(config.EXEC_EXTENSIONS)
+    return bool(name) and name.lower().rstrip(". ").endswith(config.EXEC_EXTENSIONS)
 
 
 def is_external(target: str) -> bool:

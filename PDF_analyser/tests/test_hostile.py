@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -18,12 +20,19 @@ sys.path.insert(0, HERE)
 
 import pdfgen                                      # noqa: E402
 from pdf_analyser_lib import extract as ex         # noqa: E402
-from pdf_analyser_lib import output, pipeline, report  # noqa: E402
+from pdf_analyser_lib import config, output, pipeline, report  # noqa: E402
+from pdf_analyser_lib import parser as parser_mod  # noqa: E402
 from pdf_analyser_lib.parser import PdfObject, load_pdf  # noqa: E402
 from pdf_analyser_lib.utils import Colors, defang_text  # noqa: E402
 
 SCRIPT = os.path.join(ROOT, "pdf_analyser.py")
 CATALOG = "<< /Type /Catalog >>"
+
+
+def zipped(run):
+    """Name -> bytes of every file in the run's payloads.zip, in archive order."""
+    with zipfile.ZipFile(run / "payloads.zip") as zf:
+        return {n: zf.read(n, pwd=b"infected") for n in zf.namelist()}
 
 
 def write_pdf(d, objects, name="sample.pdf"):
@@ -190,6 +199,101 @@ class ReportForgeryTests(unittest.TestCase):
         self.assertIn("Target: x\\n\\n  HIGH   fake line\\n  Verdict : LOW", text)
 
 
+class DecompressionBombTests(unittest.TestCase):
+    """A small stream that decodes to a huge size is cut at MAX_STREAM_BYTES."""
+
+    LIMIT = 1000
+
+    def setUp(self):
+        patcher = mock.patch.object(config, "MAX_STREAM_BYTES", self.LIMIT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def js_pdf(self, stream_body):
+        return [(1, "<< /Type /Catalog /OpenAction 2 0 R >>"),
+                (2, "<< /S /JavaScript /JS 3 0 R >>"), (3, stream_body)]
+
+    def assert_cut(self, r):
+        js = [e["data"] for e in r["extracted"] if e["kind"] == "javascript"]
+        self.assertEqual([len(d) for d in js], [self.LIMIT])
+        self.assertTrue(r["partial"])
+        self.assertTrue(any("decompression limit" in e for e in r["errors"]), r["errors"])
+        self.assertEqual(r["verdict"], "HIGH")   # detection still works on the kept part
+
+    def test_flate_bomb_is_cut(self):
+        self.assert_cut(analyse(self.js_pdf(pdfgen.stream_obj("", b"A" * 50000))))
+
+    def test_run_length_bomb_is_cut(self):
+        data = b"\x81A" * 100 + b"\x80"   # each pair = 128 x "A"
+        self.assertEqual(len(parser_mod._run_length_decode(data.decode("latin-1"))), self.LIMIT)
+        # pdf_parser returns RunLength output as text, which PdfObject.stream()
+        # does not use (it keeps the raw bytes), but the cut is still reported.
+        body = (b"<< /Length %d /Filter /RunLengthDecode >>\nstream\n" % len(data)
+                + data + b"\nendstream")
+        r = analyse(self.js_pdf(body))
+        self.assertTrue(any("decompression limit" in e for e in r["errors"]), r["errors"])
+
+    def test_lzw_stops_reading_at_the_limit(self):
+        class Endless:
+            def __init__(self, fp):
+                pass
+
+            def run(self):
+                while True:
+                    yield "A" * 100
+
+        with mock.patch.object(parser_mod.pdf_parser, "LZWDecoder", Endless):
+            self.assertEqual(len(parser_mod._lzw_decode("")), self.LIMIT)
+
+    def test_small_stream_unchanged(self):
+        r = analyse(self.js_pdf(pdfgen.stream_obj("", b"A" * 900)))
+        self.assertEqual([len(e["data"]) for e in r["extracted"]], [900])
+        self.assertFalse(r["partial"])
+
+
+class DamagedFlateTests(unittest.TestCase):
+    """Truncated or corrupt Flate data is decoded as far as it goes and marks the result partial."""
+
+    JS = b"app.alert('damaged');" * 20
+
+    def js_pdf(self, data, eol=b"\n"):
+        body = (b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(data)
+                + data + eol + b"endstream")
+        return [(1, "<< /Type /Catalog /OpenAction 2 0 R >>"),
+                (2, "<< /S /JavaScript /JS 3 0 R >>"), (3, body)]
+
+    def assert_damaged(self, r):
+        self.assertTrue(r["partial"])
+        self.assertTrue(any("truncated or corrupt" in e for e in r["errors"]), r["errors"])
+        js = [e["data"] for e in r["extracted"] if e["kind"] == "javascript"]
+        self.assertTrue(js and js[0].startswith(b"app.alert("), js)   # the readable part is kept
+
+    def test_truncated_stream(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse(self.js_pdf(data[:len(data) // 2])))
+
+    def test_bad_checksum(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse(self.js_pdf(data[:-4] + b"\0\0\0\0")))
+
+    def test_bad_checksum_with_crlf(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse(self.js_pdf(data[:-4] + b"\0\0\0\0", eol=b"\r\n")))
+
+    def test_damaged_objstm(self):
+        good = pdfgen.objstm_obj({2: "<< /S /JavaScript /JS (app.alert(1)) >>"})
+        head, _, rest = good.partition(b"stream\n")
+        data = rest[:-len(b"\nendstream")]
+        body = head + b"stream\n" + data[:-4] + b"\0\0\0\0" + b"\nendstream"
+        pdf = load([(1, "<< /Type /Catalog /OpenAction 2 0 R >>"), (5, body)])
+        self.assertTrue(pdf.partial)
+        self.assertTrue(any("/ObjStm compressed stream truncated" in e for e in pdf.errors), pdf.errors)
+
+    def test_intact_stream_not_flagged(self):
+        r = analyse(self.js_pdf(zlib.compress(self.JS)))
+        self.assertFalse(r["partial"], r["errors"])
+
+
 class LongNameTests(unittest.TestCase):
     """Finding 6: a 400-character embedded name must not break -out."""
 
@@ -200,10 +304,10 @@ class LongNameTests(unittest.TestCase):
                               "data": b"x"},
                              {"object": 4, "kind": "richmedia", "name": None, "data": b"y"}]}
         with tempfile.TemporaryDirectory() as d:
-            written = output.write_outputs(res, Path(d))
-            names = [p.name for p in written]
-        self.assertEqual(len(written), 3)
-        self.assertEqual(names[1], "obj3_embedded_" + "A" * 100 + ".bin")
+            output.write_outputs(res, Path(d))
+            names = list(zipped(Path(d)))
+        self.assertEqual(len(names), 2)
+        self.assertEqual(names[0], "obj3_embedded_" + "A" * 100 + ".bin")
 
 
 class DefangTests(unittest.TestCase):
@@ -290,7 +394,8 @@ class DuplicateObjectTests(unittest.TestCase):
         r = analyse([(1, CATALOG), (5, self.JS), (5, "<< /Type /Page >>")])
         self.assertIn("obj 5, copy 1", report.render(r, Colors(False)))
         with tempfile.TemporaryDirectory() as d:
-            names = [p.name for p in output.write_outputs(r, Path(d))]
+            output.write_outputs(r, Path(d))
+            names = list(zipped(Path(d)))
         self.assertIn("obj5_copy1_javascript.js.txt", names)
 
     def test_page_openaction_in_duplicate_is_info(self):
@@ -314,7 +419,8 @@ class DuplicateObjectTests(unittest.TestCase):
         self.assertEqual(sorted("script in obj 3, copy 1" in f["finding"]
                                 for f in findings(r, "/JavaScript")), [False, True])
         with tempfile.TemporaryDirectory() as d:
-            files = {p.name: p.read_bytes() for p in output.write_outputs(r, Path(d))}
+            output.write_outputs(r, Path(d))
+            files = zipped(Path(d))
         self.assertEqual(files["obj2_javascript_from_obj3_copy1.js.txt"], b"evil()")
         self.assertEqual(files["obj2_javascript_from_obj3_copy2.js.txt"], b"fine()")
 

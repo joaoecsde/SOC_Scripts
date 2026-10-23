@@ -8,15 +8,94 @@ parse was partial. Nothing in the file is ever executed.
 from __future__ import annotations
 
 import importlib.util
+import zlib
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from . import config
+
 _VENDOR_PARSER = Path(__file__).resolve().parent.parent / "vendor" / "pdf_parser.py"
 _spec = importlib.util.spec_from_file_location("pdf_parser", _VENDOR_PARSER)
 pdf_parser = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pdf_parser)
+
+
+# Size-capped stream decoders. pdf_parser's own FlateDecode, LZWDecode and
+# RunLengthDecode have no output limit, so a small hostile stream can use
+# gigabytes of memory. pdf_parser looks these names up in its own module when
+# it decodes, so replacing them here caps every decode without editing the
+# vendored file. Each one behaves like the original apart from the cap, except
+# that damaged Flate data is decoded as far as possible instead of failing.
+_cuts = [0]      # streams cut at the limit so far; PdfObject.stream() reports new ones
+_damaged = [0]   # Flate streams that were truncated or corrupt, reported the same way
+
+
+def _cap(out):
+    if len(out) > config.MAX_STREAM_BYTES:
+        _cuts[0] += 1
+        return out[:config.MAX_STREAM_BYTES]
+    return out
+
+
+def _flate_decode(data):
+    """pdf_parser.FlateDecode with a size cap and a byte-by-byte salvage of damaged data.
+
+    Unlike the original, truncated or corrupt data is decoded as far as it
+    goes instead of failing; such streams are counted in ``_damaged``.
+    """
+    raw = pdf_parser.C2BIP3(data)
+    limit = config.MAX_STREAM_BYTES + 1
+    try:
+        d = zlib.decompressobj()
+        out = d.decompress(raw, limit)
+        if not d.eof and len(out) < limit:
+            _damaged[0] += 1   # the data ends before the end of the compressed stream
+        return _cap(out)
+    except zlib.error:
+        if len(raw) <= 10:
+            raise
+        d, out = zlib.decompressobj(), bytearray()
+        for i in range(len(raw)):
+            try:
+                out += d.decompress(raw[i:i + 1], limit - len(out))
+            except zlib.error:
+                break
+            if len(out) >= limit:
+                break
+        if not out:
+            raise
+        _damaged[0] += 1
+        return _cap(bytes(out))
+
+
+def _lzw_decode(data):
+    """pdf_parser.LZWDecode with a size cap."""
+    out, size = [], 0
+    for chunk in pdf_parser.LZWDecoder(StringIO(data)).run():
+        out.append(chunk)
+        size += len(chunk)
+        if size > config.MAX_STREAM_BYTES:
+            break
+    return _cap("".join(out))
+
+
+def _run_length_decode(data):
+    """pdf_parser.RunLengthDecode with a size cap (also stops at a 0 length byte, like the original)."""
+    f, out, size = StringIO(data), [], 0
+    length = ord(f.read(1))
+    while length and length != 128 and size <= config.MAX_STREAM_BYTES:
+        piece = f.read(length + 1) if length < 128 else f.read(1) * (257 - length)
+        out.append(piece)
+        size += len(piece)
+        length = ord(f.read(1))
+    return _cap("".join(out))
+
+
+pdf_parser.FlateDecode = _flate_decode
+pdf_parser.LZWDecode = _lzw_decode
+pdf_parser.RunLengthDecode = _run_length_decode
 
 
 @dataclass
@@ -94,10 +173,17 @@ class PdfObject:
                 return None
         except Exception:   # defensive: parser internals must not crash the tool
             return None
+        cuts, damaged = _cuts[0], _damaged[0]
         try:
             data = self.element.Stream(True)
         except Exception as exc:
             data = "decode error: %s" % exc
+        if _cuts[0] != cuts and self.parent is not None:
+            self.parent.add_error_once("object %d: decoded stream cut at %d MB (decompression limit)"
+                                       % (self.id, config.MAX_STREAM_BYTES // (1024 * 1024)))
+        if _damaged[0] != damaged and self.parent is not None:
+            self.parent.add_error_once("object %d: compressed stream truncated or corrupt "
+                                       "(decoded as far as possible)" % self.id)
         if isinstance(data, bytes):
             return data
         if data != "No filters":
@@ -226,12 +312,19 @@ def load_pdf(path: str) -> ParsedPdf:
                     pdf.errors.append("object %d: /ObjStm inside an /ObjStm not expanded"
                                       % element.id)
                 elif is_objstm and element.ContainsStream():
+                    cuts, damaged = _cuts[0], _damaged[0]
                     try:
                         text = _expand_objstm(element)
                         inner = pdf_parser.cPDFParser(
                             text, False, None, (element.id, element.version))
                     except Exception as exc:
                         pdf.errors.append("object %d: /ObjStm not expanded (%s)" % (element.id, exc))
+                    if _cuts[0] != cuts:
+                        pdf.errors.append("object %d: /ObjStm cut at %d MB (decompression limit)"
+                                          % (element.id, config.MAX_STREAM_BYTES // (1024 * 1024)))
+                    if _damaged[0] != damaged:
+                        pdf.errors.append("object %d: /ObjStm compressed stream truncated or corrupt "
+                                          "(decoded as far as possible)" % element.id)
             elif element.type == pdf_parser.PDF_ELEMENT_TRAILER:
                 saw_trailer = True
                 if any(pdf_parser.EqualCanonical(tok[1], "/Encrypt") for tok in element.content):

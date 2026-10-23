@@ -15,7 +15,8 @@ Input:
 Design choices:
     * Offline: no network access of any kind.
     * Static only: JavaScript and embedded files are decoded and written as
-      inert text/bytes (``.js.txt`` / ``.bin``), never executed or opened.
+      inert text/bytes (``.js.txt`` / ``.bin``) inside ``payloads.zip``
+      (password ``infected``), never executed or opened.
     * Parsing uses the vendored Didier Stevens ``pdf-parser``, kept unmodified.
     * Everything printed is defanged and stripped of terminal control codes.
 
@@ -64,7 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Static PDF triage: finds JavaScript, auto-run actions and embedded files.")
     p.add_argument("input", help="Path to the PDF file")
     p.add_argument("-out", action="store_true", dest="out",
-                   help="Save report.txt and extracted scripts/files to pdf-analysis-results/")
+                   help="Save report.txt, and extracted scripts/files in payloads.zip "
+                        "(password: infected), to pdf-analysis-results/")
     p.add_argument("--json", action="store_true",
                    help="Save JSON_report.json (raw, not defanged) to the results folder")
     p.add_argument("--exit-code", action="store_true",
