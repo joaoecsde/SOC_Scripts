@@ -22,18 +22,30 @@ def collect_indicators(headers: dict, hops: list, links: list, attachments: list
     Relay hostnames are included because they reveal the sending
     infrastructure. Values are raw here; defanging happens when printing.
 
+    IPs of the recipient's own mail servers (the ``by`` side of the
+    receiving hops) go to ``ips_receiving``: they are not indicators and are
+    not looked up online. Every ``from`` side IP stays an indicator, because
+    a sender who forges hops naming the recipient's servers can make the
+    real sending server look like one of the receiving hops.
+
     Returns:
-        Dict with ``ips_public``, ``ips_private``, ``sender_domains``,
-        ``relay_domains``, ``link_domains``, ``urls`` and ``sha256``.
+        Dict with ``ips_public``, ``ips_private``, ``ips_receiving``,
+        ``sender_domains``, ``relay_domains``, ``link_domains``, ``urls``
+        and ``sha256``.
     """
     ips = []
     for h in hops:
-        for ip in h["ips"]:
+        for ip in h["from_ips"] if h["receiving"] else h["ips"]:
             if ip not in ips:
                 ips.append(ip)
     for ip in valid_ips(headers.get("x_originating_ip", "")):
         if ip not in ips:
             ips.append(ip)
+    receiving = []
+    for h in hops:
+        for ip in h["ips"] if h["receiving"] else []:
+            if ip not in ips and ip not in receiving:
+                receiving.append(ip)
 
     sender = {domain_of(headers[k]) for k in ("from_addr", "reply_to_addr", "return_path_addr")}
     relay = set()
@@ -46,6 +58,7 @@ def collect_indicators(headers: dict, hops: list, links: list, attachments: list
     return {
         "ips_public": [i for i in ips if is_public_ip(i)],
         "ips_private": [i for i in ips if not is_public_ip(i)],
+        "ips_receiving": receiving,
         "sender_domains": sorted(d for d in sender if d),
         "relay_domains": sorted(relay),
         "link_domains": sorted({l["host"] for l in links}),
@@ -107,7 +120,7 @@ def analyse_message(msg, keys: dict = None, delay: float = 15.0, warnings: list 
     headers = extract_headers(msg)
     hops = parse_received(msg)
     auth = parse_auth(msg, domain_of(headers["from_addr"]))
-    orig_ip = originating_ip(hops, headers)
+    orig_ip = originating_ip(hops)
     links = extract_links(msg)
     attachments = inspect_attachments(msg)
     indicators = collect_indicators(headers, hops, links, attachments)

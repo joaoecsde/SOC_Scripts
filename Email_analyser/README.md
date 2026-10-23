@@ -125,6 +125,8 @@ python3 email_header_analyser.py suspicious.eml --exit-code
 
 Attachments are only hashed and inspected as bytes. They are **never opened or executed**.
 
+**Origin IP.** Each mail server adds its Received header on top, so the newest hops were written by the recipient's own servers and cannot be forged by the sender. The tool reads the chain from the top down while the receiving (`by`) server stays in the same organisation (Microsoft 365's `outlook.com` / `office365.com` names count as one, see `RELAY_ORG_GROUPS` in `config.py`). The origin IP is the server that handed the email to the first of those hops. The IPs of the recipient's own receiving (`by`) servers are listed as "Receiving IPs": they are not indicators and are not sent to AbuseIPDB. Every IP of a sending (`from`) server stays an indicator, even on the recipient's internal hops, so a forged hop cannot hide the real sender from the lookups. `X-Originating-IP` is shown separately as unverified, because anyone can add it.
+
 ---
 
 ## Risk Score
@@ -191,3 +193,4 @@ The tests build sample emails in memory (no files or network needed). Run them a
 - Only Microsoft Safe Links and Google redirect links are unwrapped. Other gateways (e.g. Proofpoint URL Defense) show the gateway's domain.
 - A display name like "Microsoft Outlook" on internal Exchange system messages is flagged as brand impersonation.
 - Authentication-Results is only trustworthy when your own mail server added it.
+- The origin IP can still be misled by a sender who forges Received hops naming the recipient's own servers, or when the recipient's hops only show IPs or single-word server names. Each hop is read up to its last " by ", so a sender address containing " by " (Exim writes it after its own `by`, as `envelope-from <...>`) can also mislead it. The real sending IP is still listed and looked up as an indicator. When no Received header names a receiving server, the origin falls back to the oldest public IP, which is the easiest to forge.

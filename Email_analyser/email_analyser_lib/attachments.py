@@ -34,8 +34,10 @@ def _flags_for(fname: str, data: bytes) -> list:
     characters) scores higher than a risky extension alone, because it
     shows intent to deceive.
     """
-    low = fname.lower()
-    exts = re.findall(r"\.[a-z0-9]{1,5}", low)
+    # Windows drops trailing dots and spaces when saving, so "evil.exe. " is evil.exe.
+    low = fname.lower().rstrip(". ")
+    # Up to 20 characters incl. hyphens, so ".settingcontent-ms" style extensions match.
+    exts = re.findall(r"\.[a-z0-9][a-z0-9-]{0,19}", low)
     ext = exts[-1] if exts and low.endswith(exts[-1]) else ""
     flags = []
     if ext in config.RISKY_EXT:

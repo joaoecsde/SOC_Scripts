@@ -69,6 +69,15 @@ MAIL_PROVIDER_DOMAINS = {"gmail.com", "google.com", "outlook.com", "exchangelabs
                          "yahoo.com", "icloud.com", "apple.com", "zoho.com", "protonmail.com",
                          "proton.me"}
 
+# Mail providers whose own servers use several root domains in one Received
+# chain (Microsoft 365 hops are named *.outlook.com and *.office365.com).
+# Used to tell where the recipient's side of the chain ends; the first
+# domain of each group is the name the others are treated as.
+RELAY_ORG_GROUPS = [
+    ("outlook.com", "office365.com", "exchangelabs.com", "microsoft.com"),
+    ("yahoo.com", "yahoodns.net"),
+]
+
 # Email service providers (newsletters, helpdesks, transactional mail). Mail
 # sent through them legitimately has Return-Path / Message-ID / SPF domains
 # of the provider. Only used to name the provider in the report.
@@ -108,13 +117,15 @@ IGNORED_URL_HOSTS = {"www.w3.org", "w3.org", "schemas.microsoft.com",
 # Extensions that can run code or smuggle a payload. Archives, disk images
 # (.iso/.img/.vhd), HTML/SVG (HTML smuggling, credential pages), OneNote,
 # Excel add-ins (.xll) and web queries (.iqy/.slk) are included because they
-# are common ways to get past mail filters.
+# are common ways to get past mail filters. The "-ms" ones are Windows shell
+# files (settings shortcuts, libraries, saved searches) that can run commands.
 RISKY_EXT = {".exe", ".scr", ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".bat", ".cmd",
              ".ps1", ".com", ".pif", ".jar", ".msi", ".msix", ".appx", ".dll", ".lnk",
              ".iso", ".img", ".vhd", ".vhdx", ".hta", ".cpl", ".reg", ".chm", ".msc",
              ".docm", ".dotm", ".xlsm", ".xlsb", ".xltm", ".pptm", ".ppam", ".xlam", ".xll",
              ".iqy", ".slk", ".one", ".html", ".htm", ".shtml", ".svg",
-             ".zip", ".rar", ".7z", ".ace", ".gz", ".tar", ".cab", ".arj", ".xz"}
+             ".zip", ".rar", ".7z", ".ace", ".gz", ".tar", ".cab", ".arj", ".xz",
+             ".settingcontent-ms", ".library-ms", ".appref-ms", ".search-ms", ".searchconnector-ms"}
 
 # "Harmless-looking" extensions. Seeing one right before a risky one
 # ("invoice.pdf.exe") indicates a double-extension disguise.
