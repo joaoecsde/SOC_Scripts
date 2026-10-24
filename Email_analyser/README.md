@@ -116,7 +116,7 @@ python3 email_header_analyser.py suspicious.eml --exit-code
 |---|---|
 | Authentication (45) | SPF, every DKIM signature, DMARC; SPF/DKIM alignment with From when DMARC did not pass |
 | Sender (40) | Reply-To, Return-Path and Message-ID vs From; missing Message-ID / Date. Collapsed into one info note when DMARC passes |
-| Impersonation (50) | Address in display name, brand in display name, lookalike / digit-swapped / punycode From domains, suspicious TLDs |
+| Impersonation (50) | Address in display name, brand in display name (medium when sent from the brand's own free mail, e.g. "Microsoft" from a personal `@outlook.com`), lookalike / digit-swapped / punycode From domains, suspicious TLDs |
 | Relay (20) | Missing Received headers, long chains, big delays, timestamps going backwards, no public origin IP |
 | Mailer (10) | Bulk-mail / script X-Mailer |
 | Links (40) | Text shows one domain but links to another, `@` in URL, bare-IP links, HTML forms, lookalike / punycode link domains, shorteners, suspicious TLDs, direct downloads of risky files |
@@ -125,7 +125,7 @@ python3 email_header_analyser.py suspicious.eml --exit-code
 
 Attachments are only hashed and inspected as bytes. They are **never opened or executed**.
 
-**Origin IP.** Each mail server adds its Received header on top, so the newest hops were written by the recipient's own servers and cannot be forged by the sender. The tool reads the chain from the top down while the receiving (`by`) server stays in the same organisation (Microsoft 365's `outlook.com` / `office365.com` names count as one, see `RELAY_ORG_GROUPS` in `config.py`). The origin IP is the server that handed the email to the first of those hops. The IPs of the recipient's own receiving (`by`) servers are listed as "Receiving IPs": they are not indicators and are not sent to AbuseIPDB. Every IP of a sending (`from`) server stays an indicator, even on the recipient's internal hops, so a forged hop cannot hide the real sender from the lookups. `X-Originating-IP` is shown separately as unverified, because anyone can add it.
+**Origin IP.** Each mail server adds its Received header on top, so the newest hops were written by the recipient's own servers and cannot be forged by the sender. The tool reads the chain from the top down while the receiving (`by`) server stays in the same organisation (Microsoft 365's `outlook.com` / `office365.com` names count as one, see `RELAY_ORG_GROUPS` in `config.py`). The origin IP is the server that handed the email to the first of those hops, as recorded by the receiving server (not an IP the sender put in its HELO name, such as `from [8.8.8.8] (unknown [real IP])`). The IPs of the recipient's own receiving (`by`) servers are listed as "Receiving IPs": they are not indicators and are not sent to AbuseIPDB. Every IP of a sending (`from`) server stays an indicator, even on the recipient's internal hops, so a forged hop cannot hide the real sender from the lookups. `X-Originating-IP` is shown separately as unverified, because anyone can add it.
 
 ---
 

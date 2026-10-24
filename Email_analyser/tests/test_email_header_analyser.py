@@ -87,7 +87,8 @@ class CleanMailStaysClean(unittest.TestCase):
 
     def test_real_brand_domains(self):
         for sender in ("Microsoft <no-reply@microsoftonline.com>", "PayPal <service@paypal.de>",
-                       "Amazon <ship@amazon.co.uk>", "Apple <no_reply@email.apple.com>", "UPS <pkg@ups.com>"):
+                       "Amazon <ship@amazon.co.uk>", "Apple <no_reply@email.apple.com>", "UPS <pkg@ups.com>",
+                       "iCloud <noreply@insideicloud.icloud.com>"):
             with self.subTest(sender=sender):
                 r = analyse([("From", sender), ("Message-ID", "<1@x.com>")])
                 self.assertEqual(texts(r, "impersonation"), [])
@@ -125,6 +126,15 @@ class PhishingIsCaught(unittest.TestCase):
         r = analyse([("From", '"UPS Delivery" <track@gmail.com>')])
         self.assertTrue(any("free mail" in t for t in texts(r, "impersonation")))
 
+    def test_brand_display_name_from_brands_own_free_mail(self):
+        for sender in ('"Microsoft Account Team" <alert1987@outlook.com>', '"Google Security" <x@gmail.com>',
+                       '"Apple Support" <x@icloud.com>', '"Apple Support" <x@me.com>'):
+            with self.subTest(sender=sender):
+                r = analyse([("From", sender), ("Message-ID", "<1@x.com>")])
+                imp = [f for f in r["findings"] if f["category"] == "impersonation"]
+                self.assertEqual([(f["points"], f["severity"]) for f in imp], [(15, "medium")])
+                self.assertIn("personal", imp[0]["finding"])
+
     def test_link_tricks(self):
         html = ('<a href="https://evil.xyz/login">https://www.paypal.com</a>'
                 '<a href="https://paypal.com@evil.top/x">x</a>'
@@ -133,6 +143,13 @@ class PhishingIsCaught(unittest.TestCase):
         found = " | ".join(texts(analyse([("From", "a@b.com")], html=html), "links"))
         for expected in ("Link text shows", "behind '@'", "bare IP", "risky file type (.iso)", "HTML form"):
             self.assertIn(expected, found)
+
+    def test_unclosed_and_nested_links_are_checked(self):
+        for html in ('<a href="https://evil.xyz/login">Click here',
+                     '<a href="https://evil.xyz/login">x<a href="https://ok.com">ok</a>'):
+            with self.subTest(html=html):
+                r = analyse([("From", "a@b.com")], html=html)
+                self.assertIn("https://evil.xyz/login", [l["url"] for l in r["links"]])
 
     def test_link_category_is_capped(self):
         html = "".join(f'<a href="http://203.0.113.{i}/a.exe">www.bank{i}.com</a>' for i in range(10))
@@ -239,6 +256,16 @@ class OriginIp(unittest.TestCase):
         self.assertEqual(r["indicators"]["ips_public"], ["45.33.32.156"])
         self.assertEqual(r["indicators"]["ips_receiving"], [])
 
+    def test_helo_ip_literal_does_not_choose_origin(self):
+        for received in ("from [8.8.8.8] (unknown [45.33.32.156]) by mx.me.com",          # Postfix
+                         "from [45.33.32.156] (helo=[8.8.8.8]) by mx.me.com",            # Exim, no rDNS
+                         "from h.net ([45.33.32.156] helo=[8.8.8.8]) by mx.me.com",      # Exim
+                         "from [8.8.8.8] (h.ext.com [45.33.32.156] (may be forged)) by mx.me.com"):  # Sendmail
+            with self.subTest(received=received):
+                r = chain([received])
+                self.assertEqual(r["originating_ip"], "45.33.32.156")
+                self.assertIn("8.8.8.8", r["indicators"]["ips_public"])
+
     def test_forged_hop_below_single_label_top_keeps_real_sender(self):
         r = chain(["from mail.attacker.net (x [8.8.8.8]) by EXCH01",
                    "from y (y [1.1.1.1]) by mail.attacker.net"])
@@ -251,8 +278,10 @@ class OriginIp(unittest.TestCase):
         self.assertIn("9.9.9.9", r["indicators"]["ips_public"])
 
     def test_private_entry_ip_gives_no_origin(self):
-        r = chain(["from [192.168.1.5] (unknown [192.168.1.5]) by mx.me.com"])
-        self.assertEqual(r["originating_ip"], "")
+        for received in ("from [192.168.1.5] (unknown [192.168.1.5]) by mx.me.com",
+                         "from [10.0.0.5] (helo=[8.8.8.8]) by mx.me.com"):
+            with self.subTest(received=received):
+                self.assertEqual(chain([received])["originating_ip"], "")
 
     def test_unknown_receiving_side_falls_back_to_oldest(self):
         r = chain(["from a (a [8.8.8.8]) by 10.0.0.1", "from b (b [1.1.1.1]) by 10.0.0.2"])

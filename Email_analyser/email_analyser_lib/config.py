@@ -60,7 +60,7 @@ LEET_MAPS = (str.maketrans("013458", "oleasb"),   # paypa1    -> paypal
 # since real companies do not send from free webmail.
 FREE_MAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
              "yahoo.com", "aol.com", "proton.me", "protonmail.com", "gmx.com",
-             "mail.com", "icloud.com", "sapo.pt"}
+             "mail.com", "icloud.com", "me.com", "mac.com", "sapo.pt"}
 
 # Mail platforms whose Message-IDs never match the customer's own domain
 # (Google Workspace uses @mail.gmail.com, Microsoft 365 @*.prod.outlook.com).
