@@ -39,6 +39,28 @@ def _cap(out):
     return out
 
 
+_CHUNK = 1024 * 1024
+
+
+def _inflate(d, raw: bytes, limit: int) -> bytes:
+    """Decompress ``raw`` with ``d`` up to ``limit`` bytes, in 1 MB pieces joined once.
+
+    One growing output buffer (a single ``decompress`` call, or ``+=``) is
+    resized with realloc, and on macOS that memory is not given back after
+    the stream is freed, so every large stream would raise the footprint
+    for good. Fixed-size pieces are freed normally.
+    """
+    pieces, size = [], 0
+    while size < limit and not d.eof:
+        piece = d.decompress(raw, min(_CHUNK, limit - size))
+        if not piece:
+            break
+        pieces.append(piece)
+        size += len(piece)
+        raw = d.unconsumed_tail
+    return b"".join(pieces)
+
+
 def _flate_decode(data):
     """pdf_parser.FlateDecode with a size cap and a byte-by-byte salvage of damaged data.
 
@@ -49,25 +71,29 @@ def _flate_decode(data):
     limit = config.MAX_STREAM_BYTES + 1
     try:
         d = zlib.decompressobj()
-        out = d.decompress(raw, limit)
+        out = _inflate(d, raw, limit)
         if not d.eof and len(out) < limit:
             _damaged[0] += 1   # the data ends before the end of the compressed stream
         return _cap(out)
     except zlib.error:
         if len(raw) <= 10:
             raise
-        d, out = zlib.decompressobj(), bytearray()
+        # Pieces joined once, for the same reason as in _inflate.
+        d, pieces, size = zlib.decompressobj(), [], 0
         for i in range(len(raw)):
             try:
-                out += d.decompress(raw[i:i + 1], limit - len(out))
+                piece = d.decompress(raw[i:i + 1], limit - size)
             except zlib.error:
                 break
-            if len(out) >= limit:
+            if piece:
+                pieces.append(piece)
+                size += len(piece)
+            if size >= limit:
                 break
-        if not out:
+        if not pieces:
             raise
         _damaged[0] += 1
-        return _cap(bytes(out))
+        return _cap(b"".join(pieces))
 
 
 def _lzw_decode(data):

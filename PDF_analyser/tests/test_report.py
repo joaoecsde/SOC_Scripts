@@ -40,7 +40,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(r["file"], "sample.pdf")
         self.assertEqual(len(r["sha256"]), 64)
         self.assertIn("javascript", [e["kind"] for e in r["extracted"]])
-        self.assertIsInstance(r["extracted"][0]["data"], bytes)
+        self.assertEqual(r["extracted"][0]["size"], len("eval(unescape('%41'));"))
+        self.assertNotIn("data", r["extracted"][0])   # payload bytes are not kept in memory
 
     def test_render_defangs_and_strips(self):
         r, _ = analyse(js_pdf("app.launchURL('http://evil.com/x'); \x1b[2J eval(1);"))
@@ -69,7 +70,6 @@ class ReportTests(unittest.TestCase):
         self.assertIn("sha256", item)
         self.assertIn("size", item)
         self.assertNotIn("data", item)
-        self.assertIsInstance(r["extracted"][0]["data"], bytes)  # input not mutated
 
 
 if __name__ == "__main__":

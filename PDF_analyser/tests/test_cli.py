@@ -6,6 +6,7 @@ Run from the PDF_analyser folder:
 Tests with -out / --json write to the real repo-root pdf-analysis-results/,
 so each uses a unique PDF name and removes only its own run folder.
 """
+import io
 import json
 import os
 import shutil
@@ -14,8 +15,10 @@ import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -32,6 +35,9 @@ PLAIN_JS = make_pdf({1: "<< /Type /Catalog >>",
                      2: "<< /S /JavaScript /JS (app.alert\\(1\\)) >>"})
 OPEN_JS = make_pdf({1: "<< /Type /Catalog /OpenAction 2 0 R >>",
                     2: "<< /S /JavaScript /JS (app.alert\\(1\\)) >>"})
+TWO_JS = make_pdf({1: "<< /Type /Catalog /OpenAction 2 0 R >>",
+                   2: "<< /S /JavaScript /JS (app.alert\\(1\\)) >>",
+                   3: "<< /S /JavaScript /JS (app.alert\\(2\\)) >>"})
 
 
 def run(*args):
@@ -99,6 +105,47 @@ class CliTests(unittest.TestCase):
         self.assertIn("report.txt", names)
         self.assertIn("JSON_report.json", names)
         self.assertFalse((RESULTS / (self.run_dir.name + "-2")).exists())
+
+    def test_out_zips_payloads_and_removes_staging(self):
+        before = {p.name for p in RESULTS.glob(".payloads-*")} if RESULTS.exists() else set()
+        r = run(self.pdf(OPEN_JS), "-out")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual({p.name for p in self.run_dir.iterdir()}, {"report.txt", "payloads.zip"})
+        self.assertEqual({p.name for p in RESULTS.glob(".payloads-*")}, before)
+
+    def test_staging_failure_still_prints_verdict(self):
+        # A hostile file can fill the disk while payloads are staged; the
+        # verdict must still be printed before the write error.
+        # The run folder still gets report.txt and the JSON, only no zip.
+        import pdf_analyser
+        full = OSError(28, "No space left on device")
+        cases = {"payload write fails": (OPEN_JS, mock.patch.object(
+                     Path, "write_bytes", side_effect=full)),
+                 # The first payload is staged, the second fails: no zip, so the
+                 # JSON must not name the first one as inside payloads.zip.
+                 "second payload write fails": (TWO_JS, mock.patch.object(
+                     Path, "write_bytes", side_effect=[None, full])),
+                 "staging folder cannot be made": (OPEN_JS, mock.patch.object(
+                     pdf_analyser, "payload_stage", side_effect=full))}
+        for name, (data, failure) in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.run_dir, ignore_errors=True)
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(sys, "argv",
+                                       ["pdf_analyser.py", self.pdf(data), "-out", "--json"]), \
+                     failure, redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as cm:
+                        pdf_analyser.main()
+                self.assertEqual(cm.exception.code, 3)
+                self.assertIn("HIGH", out.getvalue())
+                self.assertIn("cannot save payloads", err.getvalue())
+                self.assertIn("No space left on device", err.getvalue())
+                self.assertEqual({p.name for p in self.run_dir.iterdir()},
+                                 {"report.txt", "JSON_report.json"})
+                saved = json.loads((self.run_dir / "JSON_report.json").read_text(encoding="utf-8"))
+                self.assertTrue(saved["extracted"])
+                self.assertEqual([e["payload_name"] for e in saved["extracted"]],
+                                 [None] * len(saved["extracted"]))
 
     def test_out_flag_creates_folder(self):
         r = run(self.pdf(CLEAN), "-out")

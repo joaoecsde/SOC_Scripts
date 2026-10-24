@@ -206,16 +206,24 @@ def _filespec_name(pdf: ParsedPdf, value) -> Optional[str]:
 
 
 def find_javascript(pdf: ParsedPdf) -> List[dict]:
+    """List form of ``iter_javascript``."""
+    return list(iter_javascript(pdf))
+
+
+def iter_javascript(pdf: ParsedPdf) -> Iterator[dict]:
     """Find JavaScript held in ``/JS`` entries.
 
-    Returns:
+    A generator, so a caller can handle each script and drop it before the
+    next streams are decoded (memory holds a few streams at most, not all).
+
+    Yields:
         Dicts ``{"object", "objstm", "copy", "source_object", "source_copy",
         "code", "data"}``, one per copy of a referenced script, deduplicated
         by source copy. ``source_copy`` is the copy of ``source_object``
         holding the script when that id has several copies, else None.
         ``data`` is the script stream's bytes, or None for a string script.
     """
-    results, seen = [], set()
+    seen = set()
     for obj in _all(pdf):
         oid = obj.id
         for value in _js_values(_items(obj)):
@@ -239,10 +247,9 @@ def find_javascript(pdf: ParsedPdf) -> List[dict]:
                     code = _bytes_to_text(data) if data is not None \
                         else decode_pdf_string(_lookup(_items(ref), "/JS")) \
                         or _body_string(ref)
-                results.append({"object": oid, "objstm": obj.objstm, "copy": _copy(obj),
-                                "source_object": source, "source_copy": _copy(ref),
-                                "code": code, "data": data})
-    return results
+                yield {"object": oid, "objstm": obj.objstm, "copy": _copy(obj),
+                       "source_object": source, "source_copy": _copy(ref),
+                       "code": code, "data": data}
 
 
 def _body_string(obj: PdfObject) -> str:
@@ -428,14 +435,20 @@ def find_triggers(pdf: ParsedPdf) -> List[dict]:
 
 
 def find_embedded_files(pdf: ParsedPdf) -> List[dict]:
+    """List form of ``iter_embedded_files``."""
+    return list(iter_embedded_files(pdf))
+
+
+def iter_embedded_files(pdf: ParsedPdf) -> Iterator[dict]:
     """Find embedded file streams (``/Type /EmbeddedFile`` or filespec ``/EF``).
 
     Filespecs are found at any depth (e.g. inline in a ``/Names`` array).
     Every copy of an ``/EF`` target is returned, but when there are several
     only the copies that look like an attachment get the filespec name (see
-    ``_attachment_copies``); the others have name None.
+    ``_attachment_copies``); the others have name None. A generator, like
+    ``iter_javascript``.
 
-    Returns:
+    Yields:
         Dicts ``{"object", "objstm", "copy", "name", "data"}``.
     """
     targets: Set[Tuple[int, int]] = set()              # (id, copy) of every /EF target
@@ -453,7 +466,6 @@ def find_embedded_files(pdf: ParsedPdf) -> List[dict]:
                         targets.update((o.id, o.copy) for o in copies)
                         for o in _attachment_copies(copies):
                             names.setdefault((o.id, o.copy), name)
-    results = []
     for obj in _all(pdf):
         key = (obj.id, obj.copy)
         if key not in targets and not pdf_parser.EqualCanonical(obj.type(), "/EmbeddedFile"):
@@ -461,9 +473,8 @@ def find_embedded_files(pdf: ParsedPdf) -> List[dict]:
         data = obj.stream()
         if data is None:
             continue
-        results.append({"object": obj.id, "objstm": obj.objstm, "copy": _copy(obj),
-                        "name": names.get(key), "data": data})
-    return results
+        yield {"object": obj.id, "objstm": obj.objstm, "copy": _copy(obj),
+               "name": names.get(key), "data": data}
 
 
 def _attachment_copies(copies: List[PdfObject]) -> List[PdfObject]:
@@ -492,8 +503,13 @@ def find_keywords(pdf: ParsedPdf) -> Dict[str, List[int]]:
 
 
 def find_richmedia_streams(pdf: ParsedPdf) -> List[dict]:
-    """Return streams referenced one level deep from ``/RichMedia`` objects."""
-    results, seen = [], set()
+    """List form of ``iter_richmedia_streams``."""
+    return list(iter_richmedia_streams(pdf))
+
+
+def iter_richmedia_streams(pdf: ParsedPdf) -> Iterator[dict]:
+    """Yield streams referenced one level deep from ``/RichMedia`` objects (a generator)."""
+    seen = set()
     for obj in _all(pdf):
         if not obj.has_name("/RichMedia"):
             continue
@@ -507,9 +523,7 @@ def find_richmedia_streams(pdf: ParsedPdf) -> List[dict]:
                 if data is None:
                     continue
                 seen.add((rid, ref.copy))
-                results.append({"object": rid, "objstm": ref.objstm, "copy": _copy(ref),
-                                "data": data})
-    return results
+                yield {"object": rid, "objstm": ref.objstm, "copy": _copy(ref), "data": data}
 
 
 def find_duplicates(pdf: ParsedPdf) -> List[dict]:
