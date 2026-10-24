@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -17,12 +18,25 @@ except ImportError:
 ABUSEIPDB_API_KEY  = os.environ.get("ABUSEIPDB_API_KEY")  or getattr(api_keys, "ABUSEIPDB_API_KEY", "")
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY") or getattr(api_keys, "VIRUSTOTAL_API_KEY", "")
 
-# ── Regex helpers ───────────────────────────────────────────────────────────────
-IPV4_RE  = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+def has_key(key: str) -> bool:
+    """Return True for a real key; unedited templates ("your_..._here") count as missing."""
+    return bool(key) and not key.startswith("your_")
+
+# ── Indicator helpers ───────────────────────────────────────────────────────────
 HASH_RE  = re.compile(r"^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$")
 
 def is_ip(value: str) -> bool:
-    return bool(IPV4_RE.match(value.strip()))
+    """Any valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(value.strip())
+        return True
+    except ValueError:
+        return False
+
+def is_public_ip(value: str) -> bool:
+    """False for private, loopback, link-local, multicast and other non-routable addresses."""
+    addr = ipaddress.ip_address(value.strip())
+    return addr.is_global and not addr.is_multicast
 
 def is_hash(value: str) -> bool:
     return bool(HASH_RE.match(value.strip()))
@@ -199,11 +213,14 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:
-  python threat_lookup.py --abusekey YOUR_KEY --vtkey YOUR_KEY \\
-      --indicators 1.2.3.4 d41d8cd98f00b204e9800998ecf8427e
+  python threat_lookup.py --indicators 1.2.3.4 d41d8cd98f00b204e9800998ecf8427e
 
-  python threat_lookup.py --abusekey KEY --vtkey KEY \\
-      --file indicators.txt --json results.json
+  python threat_lookup.py --file indicators.txt --json results.json
+
+API keys are read from ../api_keys.py or the ABUSEIPDB_API_KEY /
+VIRUSTOTAL_API_KEY environment variables. --abusekey / --vtkey also exist,
+but a key typed on the command line ends up in shell history and the
+process list.
         """
     )
     parser.add_argument("--indicators", nargs="+", metavar="VALUE",
@@ -218,8 +235,8 @@ Examples:
                         help="Also save results to a JSON file")
     parser.add_argument("--max-age", type=int, default=90, metavar="DAYS",
                         help="AbuseIPDB: max age of reports in days (default: 90)")
-    parser.add_argument("--delay", type=float, default=0.5, metavar="SECONDS",
-                        help="Delay between API calls in seconds (default: 0.5)")
+    parser.add_argument("--delay", type=float, default=15.0, metavar="SECONDS",
+                        help="Delay between VirusTotal calls in seconds (default: 15, free tier = 4/min)")
 
     args = parser.parse_args()
 
@@ -243,12 +260,12 @@ Examples:
     # Validate API keys
     missing_keys = []
     for indicator in indicators:
-        if is_ip(indicator) and not args.abusekey:
-            missing_keys.append("--abusekey (AbuseIPDB) required for IP lookups")
+        if is_ip(indicator) and is_public_ip(indicator) and not has_key(args.abusekey):
+            missing_keys.append("AbuseIPDB key required for IP lookups (api_keys.py or ABUSEIPDB_API_KEY)")
             break
     for indicator in indicators:
-        if is_hash(indicator) and not args.vtkey:
-            missing_keys.append("--vtkey (VirusTotal) required for hash lookups")
+        if is_hash(indicator) and not has_key(args.vtkey):
+            missing_keys.append("VirusTotal key required for hash lookups (api_keys.py or VIRUSTOTAL_API_KEY)")
             break
     if missing_keys:
         for msg in set(missing_keys):
@@ -258,23 +275,33 @@ Examples:
     all_results = []
     print(f"\n{BOLD}Threat Intelligence Lookup — {len(indicators)} indicator(s){RESET}")
 
-    for i, indicator in enumerate(indicators):
+    # Only VirusTotal's free tier is tight (4/min); AbuseIPDB allows 1,000/day
+    vt_called = False
+    for indicator in indicators:
         indicator = indicator.strip()
-        if i > 0:
-            time.sleep(args.delay)
 
-        if is_ip(indicator):
+        if is_ip(indicator) and not is_public_ip(indicator):
+            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — private or reserved IP address "
+                  f"(internal network, loopback, etc.), so it has no AbuseIPDB reputation{RESET}")
+            all_results.append({"type": "ip", "indicator": indicator,
+                                "result": {"skipped": "Private or reserved IP address, not looked up"}})
+
+        elif is_ip(indicator):
             result = lookup_ip(indicator, args.abusekey, args.max_age)
             print_ip_result(indicator, result)
             all_results.append({"type": "ip", "indicator": indicator, "result": result})
 
         elif is_hash(indicator):
+            if vt_called:
+                print(f"\n{GRAY}Waiting {args.delay:g}s (VirusTotal free-tier limit)...{RESET}", flush=True)
+                time.sleep(args.delay)
+            vt_called = True
             result = lookup_hash(indicator, args.vtkey)
             print_hash_result(indicator, result)
             all_results.append({"type": "hash", "indicator": indicator, "result": result})
 
         else:
-            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — not a valid IPv4 address or MD5/SHA1/SHA256 hash{RESET}")
+            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — not a valid IP address or MD5/SHA1/SHA256 hash{RESET}")
             all_results.append({"type": "unknown", "indicator": indicator, "result": {"error": "Unrecognised format"}})
 
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
