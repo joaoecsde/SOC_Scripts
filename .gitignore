@@ -3,4 +3,5 @@ __pycache__/
 .DS_Store
 
 *.eml
+*.pdf
 pdf-analysis-results/
