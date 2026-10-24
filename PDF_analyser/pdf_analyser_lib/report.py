@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from typing import Union
 
 from . import __version__
@@ -70,6 +71,10 @@ def render(result: dict, colors: Colors) -> str:
     lines.append(_section(c, f"Findings ({len(result['findings'])})"))
     if not result["findings"]:
         lines.append(f"  {c.GREEN}No suspicious indicators found{c.RESET}")
+    counts = Counter(_clean(f["keyword"]) for f in result["findings"])
+    width = max(map(len, counts), default=0)
+    for kw, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"  {kw:<{width}}  {n:>4}")
     for f in sorted(result["findings"], key=lambda x: _SEV_ORDER.get(x["severity"], 9)):
         where = f"obj {f['object']}"
         if f.get("copy") is not None:
