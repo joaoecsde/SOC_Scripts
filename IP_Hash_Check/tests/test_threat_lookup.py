@@ -94,6 +94,26 @@ class TestMain(unittest.TestCase):
         self.assertEqual(results[0]["indicator"], "10.0.0.1")
         self.assertIn("skipped", results[0]["result"])
 
+    def test_defanged_ips_are_looked_up(self):
+        calls, _, _, _ = run(["--abusekey", "k", "--indicators", "8[.]8[.]8[.]8", "1(.)1[dot]1.1",
+                              "2001[:]4860[:]4860::8888", "9.9.9.9"])
+        self.assertEqual(calls, [("ip", "8.8.8.8"), ("ip", "1.1.1.1"),
+                                 ("ip", "2001:4860:4860::8888"), ("ip", "9.9.9.9")])
+
+    def test_defanged_ips_in_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "iocs.txt")
+            with open(path, "w") as f:
+                f.write("# comment\n1[.]2[.]3[.]4 \n8.8.8.8\n")
+            calls, _, _, _ = run(["--abusekey", "k", "--file", path])
+        self.assertEqual(calls, [("ip", "1.2.3.4"), ("ip", "8.8.8.8")])
+
+    def test_defanged_domain_stays_defanged(self):
+        calls, _, out, _ = run(["--abusekey", "k", "--indicators", "evil[.]com"])
+        self.assertEqual(calls, [])
+        self.assertIn("evil[.]com", out)
+        self.assertNotIn("evil.com", out)
+
     def test_invalid_ip_not_looked_up(self):
         calls, _, out, _ = run(["--abusekey", "k", "--indicators", "999.1.1.1"])
         self.assertEqual(calls, [])

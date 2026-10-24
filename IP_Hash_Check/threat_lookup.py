@@ -41,6 +41,16 @@ def is_public_ip(value: str) -> bool:
 def is_hash(value: str) -> bool:
     return bool(HASH_RE.match(value.strip()))
 
+def refang(value: str) -> str:
+    """Undo common IP defanging: 1[.]2(.)3[dot]4 -> 1.2.3.4, 2001[:]db8::1 -> 2001:db8::1.
+
+    Anything that is not an IP once refanged (e.g. evil[.]com) is kept
+    defanged, so it is never printed or exported as a live indicator.
+    """
+    value = value.strip()
+    ip = re.sub(r"(?i)\[\.\]|\(\.\)|\[dot\]|\(dot\)", ".", value).replace("[:]", ":")
+    return ip if is_ip(ip) else value
+
 
 # ── AbuseIPDB ──────────────────────────────────────────────────────────────────
 def lookup_ip(ip: str, api_key: str, max_age_days: int = 90) -> dict:
@@ -240,15 +250,15 @@ process list.
 
     args = parser.parse_args()
 
-    # Collect indicators
-    indicators = list(args.indicators or [])
+    # Collect indicators (defanged IPs such as 1[.]2[.]3[.]4 are accepted)
+    indicators = [refang(i) for i in args.indicators or []]
     if args.file:
         try:
             with open(args.file) as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        indicators.append(line)
+                        indicators.append(refang(line))
         except FileNotFoundError:
             print(f"{RED}Error: File not found: {args.file}{RESET}")
             sys.exit(1)

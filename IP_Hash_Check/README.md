@@ -51,12 +51,12 @@ You can also use environment variables (`ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY
 
 ### Check a single IP
 ```bash
-python3 threat_lookup.py --indicators 1[.]2[.]3[.]4
+python3 threat_lookup.py --indicators '1[.]2[.]3[.]4'
 ```
 
 ### Check multiple IPs
 ```bash
-python3 threat_lookup.py --indicators 1[.]2[.]3[.]4 8[.]8[.]8[.]8
+python3 threat_lookup.py --indicators '1[.]2[.]3[.]4' '8[.]8[.]8[.]8'
 ```
 
 ### Check a single hash
@@ -71,7 +71,7 @@ python3 threat_lookup.py --indicators <SHA256> <MD5>
 
 ### Mix IPs and hashes in the same command
 ```bash
-python3 threat_lookup.py --indicators 1[.]2[.]3[.]4 <SHA256>
+python3 threat_lookup.py --indicators '1[.]2[.]3[.]4' <SHA256>
 ```
 
 ---
@@ -88,7 +88,7 @@ The script detects the format automatically based on length.
 
 ## Supported IP Formats
 
-IPv4 and IPv6 addresses are both supported. Private and reserved addresses (e.g. `10.x.x.x`, `192.168.x.x`, `127.0.0.1`, `::1`) are skipped with a message, since they belong to internal networks and have no AbuseIPDB reputation.
+IPv4 and IPv6 addresses are both supported, plain or defanged (`1[.]2[.]3[.]4`, `1(.)2(.)3(.)4`, `1[dot]2[dot]3[dot]4`, `2001[:]db8::1`), on the command line and in files. On the command line, put defanged values in quotes (`'1[.]2[.]3[.]4'`): the shell treats `[.]` as a file-name pattern (zsh, the macOS default, stops with `no matches found`; bash can replace it with a matching file name), and `(.)` is a syntax error in both. Private and reserved addresses (e.g. `10.x.x.x`, `192.168.x.x`, `127.0.0.1`, `::1`) are skipped with a message, since they belong to internal networks and have no AbuseIPDB reputation.
 
 ---
 
