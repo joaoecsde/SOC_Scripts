@@ -33,10 +33,13 @@ def js_markers(code: str) -> List[str]:
 
 
 def is_executable(name: Optional[str], data: bytes) -> bool:
-    """True for an ``MZ`` or ``#!`` prefix, or a name with an executable extension."""
+    """True for an ``MZ`` or ``#!`` prefix, or a name with an executable extension.
+
+    Trailing dots and spaces are ignored: Windows drops them when saving.
+    """
     if data[:2] in (b"MZ", b"#!"):
         return True
-    return bool(name) and name.lower().endswith(config.EXEC_EXTENSIONS)
+    return bool(name) and name.lower().rstrip(". ").endswith(config.EXEC_EXTENSIONS)
 
 
 def is_external(target: str) -> bool:
@@ -67,9 +70,16 @@ def evaluate(facts: Dict) -> List[dict]:
         List of finding dicts with severity, keyword, object, objstm, copy,
         finding, preview, markers and target.
     """
-    out: List[dict] = []
+    return (trigger_findings(facts.get("triggers", []))
+            + [javascript_finding(j) for j in facts.get("javascript", [])]
+            + [embedded_finding(e) for e in facts.get("embedded", [])]
+            + other_findings(facts))
 
-    for t in facts.get("triggers", []):
+
+def trigger_findings(triggers: List[dict]) -> List[dict]:
+    """Findings for ``/OpenAction``, ``/AA`` and document-level JavaScript triggers."""
+    out: List[dict] = []
+    for t in triggers:
         kw = t["keyword"]
         via = (" (obj %d, copy %d)" % (t["target_object"], t["target_copy"])
                if t.get("target_copy") is not None else "")
@@ -86,34 +96,39 @@ def evaluate(facts: Dict) -> List[dict]:
         else:
             out.append(_finding("info", kw, t, "Automatic trigger with no active action "
                                 "(page destination or other action type)" + via))
+    return out
 
-    for j in facts.get("javascript", []):
-        code = j.get("code") or ""
-        where = (" (script in obj %d, copy %d)" % (j["source_object"], j["source_copy"])
-                 if j.get("source_copy") is not None and j["source_object"] != j["object"]
-                 else "")
-        if not code:
-            out.append(_finding("medium", "/JavaScript", j,
-                                "Contains JavaScript, but the script could not be resolved"))
-            continue
-        markers = js_markers(code)
-        if markers:
-            out.append(_finding("high", "/JavaScript", j,
-                                "Contains JavaScript with obfuscation markers: "
-                                + ", ".join(markers) + where, _preview(code), markers))
-        else:
-            out.append(_finding("medium", "/JavaScript", j, "Contains JavaScript" + where,
-                                _preview(code)))
 
-    for e in facts.get("embedded", []):
-        name = e.get("name")
-        label = repr(name) if name else "(unnamed)"
-        if is_executable(name, e.get("data") or b""):
-            out.append(_finding("high", "/EmbeddedFile", e,
-                                "Embeds an executable or script file: " + label))
-        else:
-            out.append(_finding("medium", "/EmbeddedFile", e, "Embeds a file: " + label))
+def javascript_finding(j: dict) -> dict:
+    """The finding for one ``extract.iter_javascript`` item."""
+    code = j.get("code") or ""
+    where = (" (script in obj %d, copy %d)" % (j["source_object"], j["source_copy"])
+             if j.get("source_copy") is not None and j["source_object"] != j["object"]
+             else "")
+    if not code:
+        return _finding("medium", "/JavaScript", j,
+                        "Contains JavaScript, but the script could not be resolved")
+    markers = js_markers(code)
+    if markers:
+        return _finding("high", "/JavaScript", j,
+                        "Contains JavaScript with obfuscation markers: "
+                        + ", ".join(markers) + where, _preview(code), markers)
+    return _finding("medium", "/JavaScript", j, "Contains JavaScript" + where, _preview(code))
 
+
+def embedded_finding(e: dict) -> dict:
+    """The finding for one ``extract.iter_embedded_files`` item."""
+    name = e.get("name")
+    label = repr(name) if name else "(unnamed)"
+    if is_executable(name, e.get("data") or b""):
+        return _finding("high", "/EmbeddedFile", e,
+                        "Embeds an executable or script file: " + label)
+    return _finding("medium", "/EmbeddedFile", e, "Embeds a file: " + label)
+
+
+def other_findings(facts: Dict) -> List[dict]:
+    """Findings for actions, keywords and duplicate objects (no stream bytes needed)."""
+    out: List[dict] = []
     for a in facts.get("actions", []):
         typ, target = a["type"], a.get("target")
         if typ == "/URI":

@@ -87,7 +87,8 @@ class CleanMailStaysClean(unittest.TestCase):
 
     def test_real_brand_domains(self):
         for sender in ("Microsoft <no-reply@microsoftonline.com>", "PayPal <service@paypal.de>",
-                       "Amazon <ship@amazon.co.uk>", "Apple <no_reply@email.apple.com>", "UPS <pkg@ups.com>"):
+                       "Amazon <ship@amazon.co.uk>", "Apple <no_reply@email.apple.com>", "UPS <pkg@ups.com>",
+                       "iCloud <noreply@insideicloud.icloud.com>"):
             with self.subTest(sender=sender):
                 r = analyse([("From", sender), ("Message-ID", "<1@x.com>")])
                 self.assertEqual(texts(r, "impersonation"), [])
@@ -125,6 +126,15 @@ class PhishingIsCaught(unittest.TestCase):
         r = analyse([("From", '"UPS Delivery" <track@gmail.com>')])
         self.assertTrue(any("free mail" in t for t in texts(r, "impersonation")))
 
+    def test_brand_display_name_from_brands_own_free_mail(self):
+        for sender in ('"Microsoft Account Team" <alert1987@outlook.com>', '"Google Security" <x@gmail.com>',
+                       '"Apple Support" <x@icloud.com>', '"Apple Support" <x@me.com>'):
+            with self.subTest(sender=sender):
+                r = analyse([("From", sender), ("Message-ID", "<1@x.com>")])
+                imp = [f for f in r["findings"] if f["category"] == "impersonation"]
+                self.assertEqual([(f["points"], f["severity"]) for f in imp], [(15, "medium")])
+                self.assertIn("personal", imp[0]["finding"])
+
     def test_link_tricks(self):
         html = ('<a href="https://evil.xyz/login">https://www.paypal.com</a>'
                 '<a href="https://paypal.com@evil.top/x">x</a>'
@@ -133,6 +143,13 @@ class PhishingIsCaught(unittest.TestCase):
         found = " | ".join(texts(analyse([("From", "a@b.com")], html=html), "links"))
         for expected in ("Link text shows", "behind '@'", "bare IP", "risky file type (.iso)", "HTML form"):
             self.assertIn(expected, found)
+
+    def test_unclosed_and_nested_links_are_checked(self):
+        for html in ('<a href="https://evil.xyz/login">Click here',
+                     '<a href="https://evil.xyz/login">x<a href="https://ok.com">ok</a>'):
+            with self.subTest(html=html):
+                r = analyse([("From", "a@b.com")], html=html)
+                self.assertIn("https://evil.xyz/login", [l["url"] for l in r["links"]])
 
     def test_link_category_is_capped(self):
         html = "".join(f'<a href="http://203.0.113.{i}/a.exe">www.bank{i}.com</a>' for i in range(10))
@@ -165,6 +182,111 @@ class Attachments(unittest.TestCase):
     def test_rtl_override_filename(self):
         r = analyse([("From", "a@b.com")], attachments=[(b"x", "invoice‮fdp.exe")])
         self.assertTrue(any("RTL" in t for t in texts(r, "attachments")))
+
+    def test_trailing_dots_and_spaces_do_not_hide_extension(self):
+        # Windows drops trailing dots and spaces, so these save as .exe / .pdf.exe.
+        for name in ("payload.exe.", "payload.exe ", "payload.exe. .", "invoice.pdf.exe."):
+            r = analyse([("From", "a@b.com")], attachments=[(b"x", name)])
+            self.assertTrue(any("risky file extension (.exe)" in t for t in texts(r, "attachments")), name)
+        r = analyse([("From", "a@b.com")], attachments=[(b"x", "invoice.pdf.exe.")])
+        self.assertTrue(any("double extension" in t for t in texts(r, "attachments")))
+
+    def test_long_windows_extensions(self):
+        for ext in (".settingcontent-ms", ".library-ms", ".appref-ms", ".search-ms", ".searchconnector-ms"):
+            r = analyse([("From", "a@b.com")], attachments=[(b"x", "file" + ext)])
+            self.assertTrue(any(f"risky file extension ({ext})" in t for t in texts(r, "attachments")), ext)
+
+    def test_hyphenated_document_name_is_not_risky(self):
+        r = analyse([("From", "a@b.com")], attachments=[(b"x", "report.v1-final.pdf")])
+        self.assertEqual(texts(r, "attachments"), [])
+
+
+def chain(received, extra=()):
+    """Analyse a message whose Received headers are ``received``, newest (top) first."""
+    m = EmailMessage()
+    for r in received:
+        m["Received"] = r + "; " + DATE
+    for k, v in [("From", "a@sender.net"), ("Date", DATE)] + list(extra):
+        m[k] = v
+    m.set_content("hello")
+    msg, warnings = parse_email(bytes(m))
+    return analyse_message(msg, warnings=warnings)
+
+
+class OriginIp(unittest.TestCase):
+    """The origin IP is read from the top (recipient side) down, not from the forgeable bottom."""
+
+    M365 = ["from SA1PR.prod.outlook.com (2603:10b6:806:1::1) by MN2PR.prod.outlook.com",
+            "from DM6NAM.prod.protection.outlook.com (2603:10b6:5:2::1) by DM6PR.outlook.office365.com",
+            "from mail.sender.net (mail.sender.net [8.8.8.8]) by DM6NAM.mail.protection.outlook.com"]
+    FORGED = "from fake.host (fake.host [1.1.1.1]) by mail.sender.net"
+
+    def test_m365_chain_and_forged_bottom_hop(self):
+        r = chain(self.M365 + [self.FORGED])
+        self.assertEqual(r["originating_ip"], "8.8.8.8")
+        ind = r["indicators"]
+        self.assertEqual(ind["ips_public"], ["1.1.1.1", "8.8.8.8", "2603:10b6:5:2::1", "2603:10b6:806:1::1"])
+        self.assertEqual(ind["ips_receiving"], [])
+
+    def test_gmail_chain_with_internal_ip_hop_on_top(self):
+        r = chain(["by 2002:a05:6a10::1 with SMTP id abc",
+                   "from mail.sender.net (mail.sender.net. [8.8.8.8]) by mx.google.com with ESMTPS id x",
+                   self.FORGED])
+        self.assertEqual(r["originating_ip"], "8.8.8.8")
+        self.assertEqual(r["indicators"]["ips_public"], ["1.1.1.1", "8.8.8.8"])
+        self.assertEqual(r["indicators"]["ips_receiving"], ["2002:a05:6a10::1"])
+
+    # A forged hop can mislead the origin IP, but the real sending server
+    # must stay an indicator (looked up online), never a receiving IP.
+
+    def test_forged_hop_naming_recipient_org_keeps_real_sender(self):
+        r = chain(self.M365 + ["from x (x [1.1.1.1]) by evil.outlook.com"])
+        self.assertIn("8.8.8.8", r["indicators"]["ips_public"])
+        self.assertNotIn("8.8.8.8", r["indicators"]["ips_receiving"])
+
+    def test_forged_named_hop_below_ip_only_top_keeps_real_sender(self):
+        r = chain(["from a (a [8.8.8.8]) by 10.0.0.1", "from b (b [1.1.1.1]) by mail.sender.net"])
+        self.assertIn("8.8.8.8", r["indicators"]["ips_public"])
+        self.assertNotIn("8.8.8.8", r["indicators"]["ips_receiving"])
+
+    def test_helo_containing_by_keeps_real_sender(self):
+        r = chain(["from mx1.corp.com (10.0.0.5) by mbx.corp.com",
+                   "from x by mx1.corp.com (unknown [45.33.32.156]) by mx1.corp.com (Postfix) with ESMTPS id X"])
+        self.assertEqual(r["originating_ip"], "45.33.32.156")
+        self.assertEqual(r["indicators"]["ips_public"], ["45.33.32.156"])
+        self.assertEqual(r["indicators"]["ips_receiving"], [])
+
+    def test_helo_ip_literal_does_not_choose_origin(self):
+        for received in ("from [8.8.8.8] (unknown [45.33.32.156]) by mx.me.com",          # Postfix
+                         "from [45.33.32.156] (helo=[8.8.8.8]) by mx.me.com",            # Exim, no rDNS
+                         "from h.net ([45.33.32.156] helo=[8.8.8.8]) by mx.me.com",      # Exim
+                         "from [8.8.8.8] (h.ext.com [45.33.32.156] (may be forged)) by mx.me.com"):  # Sendmail
+            with self.subTest(received=received):
+                r = chain([received])
+                self.assertEqual(r["originating_ip"], "45.33.32.156")
+                self.assertIn("8.8.8.8", r["indicators"]["ips_public"])
+
+    def test_forged_hop_below_single_label_top_keeps_real_sender(self):
+        r = chain(["from mail.attacker.net (x [8.8.8.8]) by EXCH01",
+                   "from y (y [1.1.1.1]) by mail.attacker.net"])
+        self.assertIn("8.8.8.8", r["indicators"]["ips_public"])
+        self.assertNotIn("8.8.8.8", r["indicators"]["ips_receiving"])
+
+    def test_x_originating_ip_does_not_override(self):
+        r = chain(self.M365, extra=[("X-Originating-IP", "[9.9.9.9]")])
+        self.assertEqual(r["originating_ip"], "8.8.8.8")
+        self.assertIn("9.9.9.9", r["indicators"]["ips_public"])
+
+    def test_private_entry_ip_gives_no_origin(self):
+        for received in ("from [192.168.1.5] (unknown [192.168.1.5]) by mx.me.com",
+                         "from [10.0.0.5] (helo=[8.8.8.8]) by mx.me.com"):
+            with self.subTest(received=received):
+                self.assertEqual(chain([received])["originating_ip"], "")
+
+    def test_unknown_receiving_side_falls_back_to_oldest(self):
+        r = chain(["from a (a [8.8.8.8]) by 10.0.0.1", "from b (b [1.1.1.1]) by 10.0.0.2"])
+        self.assertEqual(r["originating_ip"], "1.1.1.1")
+        self.assertEqual(r["indicators"]["ips_receiving"], [])
 
 
 class InputHandling(unittest.TestCase):
@@ -223,6 +345,24 @@ class CommandLine(unittest.TestCase):
             bad_json = self.run_cli(eml, "--json", os.path.join(d, "no_such_dir", "o.json"))
             self.assertEqual(bad_json.returncode, 3)
             self.assertNotIn("Traceback", bad_json.stderr)
+
+    def test_no_terminal_codes_from_headers(self):
+        # Hand-written bytes: EmailMessage would refuse these control characters.
+        raw = (b"From: a@evil.com\r\nSubject: hi\r\nDate: " + DATE.encode() + b"\r\n"
+               b"Authentication-Results: mx; spf=pass smtp.mailfrom=x@\x1b[2Jevil.com\r\n"
+               b"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n"
+               b"--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n"
+               b"--B\r\nContent-Type: application/x-\x1b[31mevil\r\n"
+               b"Content-Disposition: attachment; filename=a.bin\r\n\r\nxx\r\n--B--\r\n")
+        with tempfile.TemporaryDirectory() as d:
+            eml = os.path.join(d, "esc.eml")
+            with open(eml, "wb") as f:
+                f.write(raw)
+            r = self.run_cli(eml)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # stdout is not a terminal here, so colours are off and any ESC is injected.
+        self.assertNotIn("\x1b", r.stdout)
+        self.assertIn("SPF envelope domain", r.stdout)
 
 
 if __name__ == "__main__":

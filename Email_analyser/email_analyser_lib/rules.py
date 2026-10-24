@@ -120,10 +120,21 @@ def _impersonation_rules(f: Findings, headers: dict, from_dom: str) -> None:
                                            f"but the real sender is {defang(from_dom) or 'unknown'}")
     # Only the first brand hit is reported to avoid stacking points.
     for brand in config.BRANDS:
-        if brand_in(brand, name) and not is_legit_brand_domain(brand, from_dom):
+        if not brand_in(brand, name):
+            continue
+        if not is_legit_brand_domain(brand, from_dom):
             why = "a free mail provider" if root_domain(from_dom) in config.FREE_MAIL else \
                   f"unrelated domain {defang(from_dom)}"
             f.add("impersonation", 20, "high", f"Display name mentions '{brand}' but the email is sent from {why}")
+            break
+        # Microsoft, Google and Apple own free mail domains too, but their
+        # official mail never comes from a personal @outlook.com / @gmail.com
+        # mailbox. Medium, as real people there may have the brand in their name.
+        # Exact domain: personal mailboxes are never on a subdomain, which only
+        # the brand can send from (e.g. insideicloud.icloud.com).
+        if from_dom in config.FREE_MAIL:
+            f.add("impersonation", 15, "medium", f"Display name mentions '{brand}' but the email is sent "
+                                                 f"from a personal {defang(from_dom)} mailbox")
             break
 
     if not from_dom:

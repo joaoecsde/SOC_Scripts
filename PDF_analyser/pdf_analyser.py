@@ -15,7 +15,8 @@ Input:
 Design choices:
     * Offline: no network access of any kind.
     * Static only: JavaScript and embedded files are decoded and written as
-      inert text/bytes (``.js.txt`` / ``.bin``), never executed or opened.
+      inert text/bytes (``.js.txt`` / ``.bin``) inside ``payloads.zip``
+      (password ``infected``), never executed or opened.
     * Parsing uses the vendored Didier Stevens ``pdf-parser``, kept unmodified.
     * Everything printed is defanged and stripped of terminal control codes.
 
@@ -34,10 +35,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import ExitStack
 from datetime import date
+from pathlib import Path
 
 from pdf_analyser_lib import __version__
-from pdf_analyser_lib.output import make_run_dir, write_outputs
+from pdf_analyser_lib.output import PayloadStage, make_run_dir, payload_stage, write_outputs
 from pdf_analyser_lib.pipeline import analyse_pdf
 from pdf_analyser_lib.report import print_report, save_json
 from pdf_analyser_lib.utils import C
@@ -64,7 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Static PDF triage: finds JavaScript, auto-run actions and embedded files.")
     p.add_argument("input", help="Path to the PDF file")
     p.add_argument("-out", action="store_true", dest="out",
-                   help="Save report.txt and extracted scripts/files to pdf-analysis-results/")
+                   help="Save report.txt, and extracted scripts/files in payloads.zip "
+                        "(password: infected), to pdf-analysis-results/")
     p.add_argument("--json", action="store_true",
                    help="Save JSON_report.json (raw, not defanged) to the results folder")
     p.add_argument("--exit-code", action="store_true",
@@ -97,25 +101,44 @@ def main() -> None:
     args = build_parser().parse_args()
     check_pdf(args.input)
 
-    try:
-        result = analyse_pdf(args.input)
-    except OSError as e:
-        fail(f"cannot read {args.input}: {e.strerror or e}")
-    except Exception as e:  # defensive: a hostile file must never print a traceback
-        fail(f"analysis failed: {type(e).__name__}: {e}")
-
-    print_report(result)  # first, so the verdict shows even if writing fails
-
-    if args.out or args.json:
+    # With -out, payloads are written to a staging folder as they are decoded
+    # (not kept in memory) and zipped into the run folder at the end. A
+    # staging error is only reported after the verdict has been printed.
+    with ExitStack() as cleanup:
+        stage, stage_error = None, None
+        if args.out:
+            try:
+                stage = PayloadStage(Path(cleanup.enter_context(payload_stage())))
+            except OSError as e:
+                stage_error = e
         try:
-            run_dir = make_run_dir(args.input, date.today())
-            if args.out:
-                write_outputs(result, run_dir)
-            if args.json:
-                save_json(result, run_dir / "JSON_report.json")
-        except (OSError, UnicodeEncodeError) as e:
-            fail(f"cannot write results: {e}")
-        print(f"{C.GREEN}Results saved to: {run_dir}{C.RESET}")
+            result = analyse_pdf(args.input, stage)
+        except OSError as e:
+            fail(f"cannot read {args.input}: {e.strerror or e}")
+        except Exception as e:  # defensive: a hostile file must never print a traceback
+            fail(f"analysis failed: {type(e).__name__}: {e}")
+
+        print_report(result)  # first, so the verdict shows even if writing fails
+
+        if args.out or args.json:
+            try:
+                run_dir = make_run_dir(args.input, date.today())
+                if args.out:
+                    stage_error = stage_error or stage.error
+                    if stage_error is not None:
+                        # Nothing is zipped, so no payload has a name in payloads.zip.
+                        for item in result["extracted"]:
+                            item["payload_name"] = None
+                    # Without a complete staging folder only report.txt is written,
+                    # so the run folder is never left empty.
+                    write_outputs(result, run_dir, None if stage_error else stage.folder)
+                if args.json:
+                    save_json(result, run_dir / "JSON_report.json")
+            except (OSError, UnicodeEncodeError) as e:
+                fail(f"cannot write results: {e}")
+            if stage_error is not None:
+                fail(f"cannot save payloads: {stage_error} (the other results are in {run_dir})")
+            print(f"{C.GREEN}Results saved to: {run_dir}{C.RESET}")
 
     if args.exit_code:
         sys.exit(_VERDICT_EXIT[result["verdict"]])

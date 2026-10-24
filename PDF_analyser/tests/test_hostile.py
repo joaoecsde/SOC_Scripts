@@ -7,7 +7,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
+import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -18,12 +21,19 @@ sys.path.insert(0, HERE)
 
 import pdfgen                                      # noqa: E402
 from pdf_analyser_lib import extract as ex         # noqa: E402
-from pdf_analyser_lib import output, pipeline, report  # noqa: E402
+from pdf_analyser_lib import config, output, pipeline, report  # noqa: E402
+from pdf_analyser_lib import parser as parser_mod  # noqa: E402
 from pdf_analyser_lib.parser import PdfObject, load_pdf  # noqa: E402
 from pdf_analyser_lib.utils import Colors, defang_text  # noqa: E402
 
 SCRIPT = os.path.join(ROOT, "pdf_analyser.py")
 CATALOG = "<< /Type /Catalog >>"
+
+
+def zipped(run):
+    """Name -> bytes of every file in the run's payloads.zip, in archive order."""
+    with zipfile.ZipFile(run / "payloads.zip") as zf:
+        return {n: zf.read(n, pwd=b"infected") for n in zf.namelist()}
 
 
 def write_pdf(d, objects, name="sample.pdf"):
@@ -36,6 +46,28 @@ def write_pdf(d, objects, name="sample.pdf"):
 def analyse(objects):
     with tempfile.TemporaryDirectory() as d:
         return pipeline.analyse_pdf(write_pdf(d, objects))
+
+
+def analyse_staged(objects):
+    """Analyse with a payload folder; return (result, payload name -> bytes)."""
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as stage:
+        r = pipeline.analyse_pdf(write_pdf(d, objects), output.PayloadStage(Path(stage)))
+        return r, {p.name: p.read_bytes() for p in Path(stage).iterdir()}
+
+
+def payloads_of(staged, kind):
+    """Bytes of each extracted item of ``kind``, in ``extracted`` order."""
+    r, files = staged
+    return [files[e["payload_name"]] for e in r["extracted"] if e["kind"] == kind]
+
+
+def analyse_and_zip(objects):
+    """Analyse with -out style staging and write_outputs; return (result, zipped payloads)."""
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as stage, \
+            tempfile.TemporaryDirectory() as run:
+        r = pipeline.analyse_pdf(write_pdf(d, objects), output.PayloadStage(Path(stage)))
+        output.write_outputs(r, Path(run), Path(stage))
+        return r, zipped(Path(run))
 
 
 def load(objects):
@@ -90,13 +122,14 @@ class InlineFilespecTests(unittest.TestCase):
     """Finding 2: embedded file reached through an inline filespec."""
 
     def test_inline_filespec_in_names_array(self):
-        r = analyse({1: "<< /Type /Catalog /Names << /EmbeddedFiles << /Names [ (x) "
-                        "<< /Type /Filespec /F (a.exe) /EF << /F 5 0 R >> >> ] >> >> >>",
-                     5: pdfgen.stream_obj("", b"MZ\x90\x00payload")})
+        staged = analyse_staged({1: "<< /Type /Catalog /Names << /EmbeddedFiles << /Names [ (x) "
+                                    "<< /Type /Filespec /F (a.exe) /EF << /F 5 0 R >> >> ] >> >> >>",
+                                 5: pdfgen.stream_obj("", b"MZ\x90\x00payload")})
+        r = staged[0]
         self.assertEqual(r["verdict"], "HIGH")
         emb = [e for e in r["extracted"] if e["kind"] == "embedded_file"]
         self.assertEqual([(e["object"], e["name"]) for e in emb], [(5, "a.exe")])
-        self.assertTrue(emb[0]["data"].startswith(b"MZ"))
+        self.assertTrue(payloads_of(staged, "embedded_file")[0].startswith(b"MZ"))
 
 
 class DeepNestingTests(unittest.TestCase):
@@ -190,20 +223,135 @@ class ReportForgeryTests(unittest.TestCase):
         self.assertIn("Target: x\\n\\n  HIGH   fake line\\n  Verdict : LOW", text)
 
 
+class DecompressionBombTests(unittest.TestCase):
+    """A small stream that decodes to a huge size is cut at MAX_STREAM_BYTES."""
+
+    LIMIT = 1000
+
+    def setUp(self):
+        patcher = mock.patch.object(config, "MAX_STREAM_BYTES", self.LIMIT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def js_pdf(self, stream_body):
+        return [(1, "<< /Type /Catalog /OpenAction 2 0 R >>"),
+                (2, "<< /S /JavaScript /JS 3 0 R >>"), (3, stream_body)]
+
+    def assert_cut(self, r):
+        js = [e["size"] for e in r["extracted"] if e["kind"] == "javascript"]
+        self.assertEqual(js, [self.LIMIT])
+        self.assertTrue(r["partial"])
+        self.assertTrue(any("decompression limit" in e for e in r["errors"]), r["errors"])
+        self.assertEqual(r["verdict"], "HIGH")   # detection still works on the kept part
+
+    def test_flate_bomb_is_cut(self):
+        self.assert_cut(analyse(self.js_pdf(pdfgen.stream_obj("", b"A" * 50000))))
+
+    def test_run_length_bomb_is_cut(self):
+        data = b"\x81A" * 100 + b"\x80"   # each pair = 128 x "A"
+        self.assertEqual(len(parser_mod._run_length_decode(data.decode("latin-1"))), self.LIMIT)
+        # pdf_parser returns RunLength output as text, which PdfObject.stream()
+        # does not use (it keeps the raw bytes), but the cut is still reported.
+        body = (b"<< /Length %d /Filter /RunLengthDecode >>\nstream\n" % len(data)
+                + data + b"\nendstream")
+        r = analyse(self.js_pdf(body))
+        self.assertTrue(any("decompression limit" in e for e in r["errors"]), r["errors"])
+
+    def test_lzw_stops_reading_at_the_limit(self):
+        class Endless:
+            def __init__(self, fp):
+                pass
+
+            def run(self):
+                while True:
+                    yield "A" * 100
+
+        with mock.patch.object(parser_mod.pdf_parser, "LZWDecoder", Endless):
+            self.assertEqual(len(parser_mod._lzw_decode("")), self.LIMIT)
+
+    def test_small_stream_unchanged(self):
+        r = analyse(self.js_pdf(pdfgen.stream_obj("", b"A" * 900)))
+        self.assertEqual([e["size"] for e in r["extracted"]], [900])
+        self.assertFalse(r["partial"])
+
+
+class StreamingMemoryTests(unittest.TestCase):
+    """Many large streams: memory holds about one decoded stream, and none is skipped."""
+
+    def test_peak_memory_does_not_grow_with_stream_count(self):
+        count, size = 30, 2 * 1024 * 1024   # 60 MB decoded in total, from a tiny file
+        objects = {1: CATALOG}
+        for i in range(count):
+            objects[10 + i] = pdfgen.stream_obj("/Type /EmbeddedFile", b"\0" * size)
+        tracemalloc.start()
+        try:
+            r = analyse(objects)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual([e["size"] for e in r["extracted"]], [size] * count)
+        self.assertLess(peak, 8 * size)   # all at once would be 30 x size
+
+
+class DamagedFlateTests(unittest.TestCase):
+    """Truncated or corrupt Flate data is decoded as far as it goes and marks the result partial."""
+
+    JS = b"app.alert('damaged');" * 20
+
+    def js_pdf(self, data, eol=b"\n"):
+        body = (b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(data)
+                + data + eol + b"endstream")
+        return [(1, "<< /Type /Catalog /OpenAction 2 0 R >>"),
+                (2, "<< /S /JavaScript /JS 3 0 R >>"), (3, body)]
+
+    def assert_damaged(self, staged):
+        r = staged[0]
+        self.assertTrue(r["partial"])
+        self.assertTrue(any("truncated or corrupt" in e for e in r["errors"]), r["errors"])
+        js = payloads_of(staged, "javascript")
+        self.assertTrue(js and js[0].startswith(b"app.alert("), js)   # the readable part is kept
+
+    def test_truncated_stream(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse_staged(self.js_pdf(data[:len(data) // 2])))
+
+    def test_bad_checksum(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse_staged(self.js_pdf(data[:-4] + b"\0\0\0\0")))
+
+    def test_bad_checksum_with_crlf(self):
+        data = zlib.compress(self.JS)
+        self.assert_damaged(analyse_staged(self.js_pdf(data[:-4] + b"\0\0\0\0", eol=b"\r\n")))
+
+    def test_damaged_objstm(self):
+        good = pdfgen.objstm_obj({2: "<< /S /JavaScript /JS (app.alert(1)) >>"})
+        head, _, rest = good.partition(b"stream\n")
+        data = rest[:-len(b"\nendstream")]
+        body = head + b"stream\n" + data[:-4] + b"\0\0\0\0" + b"\nendstream"
+        pdf = load([(1, "<< /Type /Catalog /OpenAction 2 0 R >>"), (5, body)])
+        self.assertTrue(pdf.partial)
+        self.assertTrue(any("/ObjStm compressed stream truncated" in e for e in pdf.errors), pdf.errors)
+
+    def test_intact_stream_not_flagged(self):
+        r = analyse(self.js_pdf(zlib.compress(self.JS)))
+        self.assertFalse(r["partial"], r["errors"])
+
+
 class LongNameTests(unittest.TestCase):
     """Finding 6: a 400-character embedded name must not break -out."""
 
     def test_long_name_capped(self):
-        res = {"file": "a.pdf", "sha256": "0" * 64, "size": 1, "verdict": "LOW",
-               "encrypted": False, "partial": False, "errors": [], "findings": [],
-               "extracted": [{"object": 3, "kind": "embedded_file", "name": "A" * 400 + ".txt",
-                              "data": b"x"},
-                             {"object": 4, "kind": "richmedia", "name": None, "data": b"y"}]}
-        with tempfile.TemporaryDirectory() as d:
-            written = output.write_outputs(res, Path(d))
-            names = [p.name for p in written]
-        self.assertEqual(len(written), 3)
-        self.assertEqual(names[1], "obj3_embedded_" + "A" * 100 + ".bin")
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as stage:
+            ps = output.PayloadStage(Path(stage))
+            res = {"file": "a.pdf", "sha256": "0" * 64, "size": 1, "verdict": "LOW",
+                   "encrypted": False, "partial": False, "errors": [], "findings": [],
+                   "extracted": [ps.add({"object": 3, "kind": "embedded_file",
+                                         "name": "A" * 400 + ".txt"}, b"x"),
+                                 ps.add({"object": 4, "kind": "richmedia", "name": None}, b"y")]}
+            output.write_outputs(res, Path(d), Path(stage))
+            names = list(zipped(Path(d)))
+        self.assertEqual(len(names), 2)
+        self.assertEqual(names[0], "obj3_embedded_" + "A" * 100 + ".bin")
 
 
 class DefangTests(unittest.TestCase):
@@ -231,15 +379,13 @@ class ScriptBytesTests(unittest.TestCase):
 
     def test_stream_script_bytes_exact(self):
         raw = b"var s = '\xe9\xff';"
-        r = analyse({1: CATALOG, 2: "<< /S /JavaScript /JS 3 0 R >>",
-                     3: pdfgen.stream_obj("", raw)})
-        js = [e for e in r["extracted"] if e["kind"] == "javascript"]
-        self.assertEqual(js[0]["data"], raw)
+        staged = analyse_staged({1: CATALOG, 2: "<< /S /JavaScript /JS 3 0 R >>",
+                                 3: pdfgen.stream_obj("", raw)})
+        self.assertEqual(payloads_of(staged, "javascript")[0], raw)
 
     def test_inline_script_still_utf8(self):
-        r = analyse({1: CATALOG, 2: "<< /S /JavaScript /JS (\\351) >>"})
-        js = [e for e in r["extracted"] if e["kind"] == "javascript"]
-        self.assertEqual(js[0]["data"], "\xe9".encode("utf-8"))
+        staged = analyse_staged({1: CATALOG, 2: "<< /S /JavaScript /JS (\\351) >>"})
+        self.assertEqual(payloads_of(staged, "javascript")[0], "\xe9".encode("utf-8"))
 
 
 class DuplicateObjectTests(unittest.TestCase):
@@ -275,11 +421,10 @@ class DuplicateObjectTests(unittest.TestCase):
         self.assertEqual(r["verdict"], "HIGH")
 
     def test_stream_script_in_earlier_copy_is_extracted(self):
-        r = analyse([(1, CATALOG), (2, "<< /S /JavaScript /JS 3 0 R >>"),
-                     (3, pdfgen.stream_obj("", b"evil()")),
-                     (3, pdfgen.stream_obj("", b"fine()"))])
-        js = [e["data"] for e in r["extracted"] if e["kind"] == "javascript"]
-        self.assertEqual(sorted(js), [b"evil()", b"fine()"])
+        staged = analyse_staged([(1, CATALOG), (2, "<< /S /JavaScript /JS 3 0 R >>"),
+                                 (3, pdfgen.stream_obj("", b"evil()")),
+                                 (3, pdfgen.stream_obj("", b"fine()"))])
+        self.assertEqual(sorted(payloads_of(staged, "javascript")), [b"evil()", b"fine()"])
 
     def test_single_copy_has_no_copy_label(self):
         r = analyse({1: CATALOG, 5: self.JS})
@@ -287,10 +432,9 @@ class DuplicateObjectTests(unittest.TestCase):
         self.assertEqual(findings(r, "Duplicate object"), [])
 
     def test_report_and_files_name_the_copy(self):
-        r = analyse([(1, CATALOG), (5, self.JS), (5, "<< /Type /Page >>")])
+        r, files = analyse_and_zip([(1, CATALOG), (5, self.JS), (5, "<< /Type /Page >>")])
         self.assertIn("obj 5, copy 1", report.render(r, Colors(False)))
-        with tempfile.TemporaryDirectory() as d:
-            names = [p.name for p in output.write_outputs(r, Path(d))]
+        names = list(files)
         self.assertIn("obj5_copy1_javascript.js.txt", names)
 
     def test_page_openaction_in_duplicate_is_info(self):
@@ -308,13 +452,11 @@ class DuplicateObjectTests(unittest.TestCase):
         self.assertIn("obj 5, copy 2", text["info"])
 
     def test_referenced_script_names_source_copy(self):
-        r = analyse([(1, CATALOG), (2, "<< /S /JavaScript /JS 3 0 R >>"),
-                     (3, pdfgen.stream_obj("", b"evil()")),
-                     (3, pdfgen.stream_obj("", b"fine()"))])
+        r, files = analyse_and_zip([(1, CATALOG), (2, "<< /S /JavaScript /JS 3 0 R >>"),
+                                    (3, pdfgen.stream_obj("", b"evil()")),
+                                    (3, pdfgen.stream_obj("", b"fine()"))])
         self.assertEqual(sorted("script in obj 3, copy 1" in f["finding"]
                                 for f in findings(r, "/JavaScript")), [False, True])
-        with tempfile.TemporaryDirectory() as d:
-            files = {p.name: p.read_bytes() for p in output.write_outputs(r, Path(d))}
         self.assertEqual(files["obj2_javascript_from_obj3_copy1.js.txt"], b"evil()")
         self.assertEqual(files["obj2_javascript_from_obj3_copy2.js.txt"], b"fine()")
 

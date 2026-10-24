@@ -45,13 +45,24 @@ class _LinkParser(HTMLParser):
             if tag == "area":
                 self.links.append((attrs["href"], "", "html-area"))
             else:
+                # A new <a> closes the previous one, as in a browser.
+                self._close_link()
                 self._open_href, self._open_text = attrs["href"], []
         elif tag == "form" and attrs.get("action"):
             # Forms inside emails post data straight to the attacker.
             self.links.append((attrs["action"], "", "html-form"))
 
     def handle_endtag(self, tag):
-        if tag == "a" and self._open_href is not None:
+        if tag == "a":
+            self._close_link()
+
+    def close(self):
+        # Mail clients still make an <a> without </a> clickable.
+        super().close()
+        self._close_link()
+
+    def _close_link(self):
+        if self._open_href is not None:
             text = " ".join("".join(self._open_text).split())
             self.links.append((self._open_href, text, "html-a"))
             self._open_href = None
@@ -123,7 +134,7 @@ def extract_links(msg) -> list:
                 p.feed(body)
                 p.close()
             except Exception:
-                pass   # Broken HTML: keep whatever was parsed so far.
+                p._close_link()   # Broken HTML: keep whatever was parsed so far.
             raw.extend(p.links)
             text = refang(" ".join(p.text_chunks))
         else:

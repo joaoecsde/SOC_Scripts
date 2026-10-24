@@ -5,7 +5,8 @@ import re
 from datetime import timezone
 from email.utils import getaddresses, parsedate_to_datetime
 
-from .utils import is_public_ip, valid_ips
+from . import config
+from .utils import is_ip, is_public_ip, root_domain, valid_ips
 
 
 def hdr(msg, name: str) -> str:
@@ -73,6 +74,25 @@ def extract_headers(msg) -> dict:
     }
 
 
+def _recorded_ips(from_clause: str) -> list:
+    """IPs the receiving server itself wrote in a ``from`` clause.
+
+    The first word after ``from`` is often the sender's HELO name (Postfix,
+    Sendmail, Gmail), which the sender chooses: ``from [8.8.8.8] (unknown
+    [45.33.32.156])``. The connecting IP is recorded inside the last
+    parenthesised comment. Exim also writes the HELO there as ``helo=...``,
+    so that part is removed. One level of nesting is allowed for Sendmail's
+    ``(rdns [ip] (may be forged))``. Without such a comment (Exim's
+    ``from [ip] (helo=x)``) the clause's own IPs are returned.
+    """
+    no_helo = re.sub(r"(?i)\bhelo=\S*", " ", from_clause)
+    for comment in reversed(re.findall(r"\(((?:[^()]|\([^()]*\))*)\)", no_helo)):
+        ips = valid_ips(comment)
+        if ips:
+            return ips
+    return valid_ips(no_helo)
+
+
 def parse_received(msg) -> list:
     """Rebuild the delivery path from the Received headers.
 
@@ -82,7 +102,8 @@ def parse_received(msg) -> list:
 
     IPs are split into ``from_ips`` (the host that handed over the message)
     and ``ips`` (every IP in the header), because only the former says
-    where the email came from.
+    where the email came from. ``recorded_ips`` is the part of ``from_ips``
+    written by the receiving server, not taken from the sender's HELO.
 
     Assumes the usual ``from X (...) by Y ...; <date>`` layout; hops that
     do not follow it keep empty fields rather than raising.
@@ -92,7 +113,8 @@ def parse_received(msg) -> list:
 
     Returns:
         List of hop dicts, oldest first, with ``from``, ``by``, ``from_ips``,
-        ``ips``, ``timestamp`` (aware datetime or None), ``delay_s`` and ``raw``.
+        ``recorded_ips``, ``ips``, ``timestamp`` (aware datetime or None),
+        ``delay_s``, ``receiving`` (see ``_mark_receiving``) and ``raw``.
     """
     hops = []
     for raw in msg.get_all("Received") or []:
@@ -107,14 +129,21 @@ def parse_received(msg) -> list:
                 ts = ts.replace(tzinfo=timezone.utc)
         except Exception:
             ts = None   # Malformed date: keep the hop, just without timing info.
-        frm = re.search(r"\bfrom\s+(\S+)", head, re.I)
-        by = re.search(r"\bby\s+([^\s;]+)", head, re.I)
-        # The "from" clause runs until " by "; its IPs identify the sending host.
-        from_clause = re.search(r"\bfrom\s(.*?)(?:\sby\s|$)", head, re.I)
+        # Split at the last "by": the sender chooses the HELO name in the
+        # "from" clause and can put " by " in it, but the receiving server
+        # writes its own "by" after that.
+        by = None
+        for by in re.finditer(r"\bby\s+([^\s;]+)", head, re.I):
+            pass
+        from_part = head[:by.start()] if by else head
+        frm = re.search(r"\bfrom\s+(\S+)", from_part, re.I)
+        # The "from" clause's IPs identify the sending host.
+        from_clause = re.search(r"\bfrom\s(.*)", from_part, re.I)
         hops.append({
             "from": frm.group(1) if frm else "",
             "by": by.group(1) if by else "",
             "from_ips": valid_ips(from_clause.group(1)) if from_clause else [],
+            "recorded_ips": _recorded_ips(from_clause.group(1)) if from_clause else [],
             # Only look before the ';' so digits in the date are not misread.
             "ips": valid_ips(head),
             "timestamp": ts,
@@ -124,30 +153,89 @@ def parse_received(msg) -> list:
     for i, hop in enumerate(hops):
         prev = hops[i - 1]["timestamp"] if i else None
         hop["delay_s"] = int((hop["timestamp"] - prev).total_seconds()) if (prev and hop["timestamp"]) else None
+    _mark_receiving(hops)
     return hops
 
 
-def originating_ip(hops: list, headers: dict) -> str:
-    """Best guess at the sender's public IP.
+def _relay_org(host: str) -> str:
+    """Root domain of a relay host, with ``config.RELAY_ORG_GROUPS`` merged into one name."""
+    root = root_domain(host)
+    for group in config.RELAY_ORG_GROUPS:
+        if root in group:
+            return group[0]
+    return root
 
-    X-Originating-IP wins when present, because webmail adds it with the
-    real client's IP while the Received chain only shows the provider's
-    servers. Otherwise takes the first public IP in the ``from`` clause of
-    the oldest hops (earlier private IPs are the sender's own network), then
-    any public IP in the chain. Old hops are the easiest to forge, so treat
-    the result as a lead, not proof.
+
+def _mark_receiving(hops: list) -> None:
+    """Set ``hop["receiving"]`` on the hops added by the recipient's own mail servers.
+
+    Each server prepends its Received header, so the newest hops were
+    written by the recipient's side and cannot be forged by the sender.
+    Walking down from the newest hop, the recipient's organisation is the
+    root domain of the first ``by`` host name; hops stay on the receiving
+    side while their ``by`` host belongs to it. Hops at the very top whose
+    ``by`` is only an IP or missing (Gmail's internal hops) count as
+    receiving too. The walk stops at the first hop received by another
+    organisation: that hop and everything below it came from the sender's
+    side and may be forged.
+
+    If no ``by`` host name is found, every hop is marked False.
+
+    Limitation: a sender who forges hops whose ``by`` names the recipient's
+    servers extends the receiving side into the forged part. This only
+    misleads ``originating_ip``: ``collect_indicators`` keeps every ``from``
+    side IP as an indicator.
+    """
+    org = None
+    for hop in hops:
+        hop["receiving"] = False
+    for hop in reversed(hops):   # newest first
+        by = hop["by"].strip("[]()")
+        named = "." in by and not is_ip(by)
+        if org is None:
+            if named:
+                org = _relay_org(by)
+            hop["receiving"] = True
+        elif named and _relay_org(by) == org:
+            hop["receiving"] = True
+        else:
+            break
+    if org is None:
+        for hop in hops:
+            hop["receiving"] = False
+
+
+def entry_hop(hops: list):
+    """Return the hop where the email entered the recipient's servers, or None if unknown."""
+    return next((h for h in hops if h["receiving"]), None)
+
+
+def originating_ip(hops: list) -> str:
+    """Best guess at the public IP of the server that sent the email.
+
+    This is the public IP in the ``from`` clause of ``entry_hop``: the
+    server that handed the email to the recipient's servers, as recorded
+    by those servers (``recorded_ips``, so a HELO such as ``[8.8.8.8]``
+    cannot choose it). A private IP there (e.g. mail sent inside the same
+    organisation) gives an empty result.
+
+    When the receiving side cannot be identified, falls back to the first
+    public IP of the oldest hops. Those hops are the easiest to forge, so
+    that result is only a lead.
+
+    X-Originating-IP is not used: anyone can add that header. It is still
+    reported and listed as an indicator.
 
     Args:
         hops: Output of ``parse_received`` (oldest first).
-        headers: Output of ``extract_headers``.
 
     Returns:
         Public IP string, or an empty string if none was found.
     """
-    xo = headers.get("x_originating_ip", "")
-    if xo and is_public_ip(xo):
-        return xo
-    for key in ("from_ips", "ips"):
+    entry = entry_hop(hops)
+    if entry is not None:
+        return next((ip for ip in entry["recorded_ips"] if is_public_ip(ip)), "")
+    for key in ("recorded_ips", "from_ips", "ips"):
         for hop in hops:
             for ip in hop[key]:
                 if is_public_ip(ip):

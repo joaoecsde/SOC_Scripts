@@ -39,6 +39,9 @@ def _print_headers(r: dict) -> None:
         print(f"  {label:<12}: {_na(value)}")
     ip = r["originating_ip"]
     print(f"  {'Origin IP':<12}: {defang(ip) if ip else C.GRAY + 'not identified' + C.RESET}")
+    if h["x_originating_ip"]:
+        print(f"  {'X-Orig. IP':<12}: {safe(defang(h['x_originating_ip']))}  "
+              f"{C.GRAY}(unverified: anyone can add this header){C.RESET}")
 
 
 def _print_chain(hops: list) -> None:
@@ -60,15 +63,16 @@ def _print_auth(a: dict) -> None:
         print(f"  {mech.upper():<6}: {col}{safe(v)}{C.RESET}")
     if a["spf_domain"]:
         mark = "aligned" if a["spf_aligned"] else "not aligned with From"
-        print(f"  SPF envelope domain : {defang(a['spf_domain'])} ({mark})")
+        print(f"  SPF envelope domain : {safe(defang(a['spf_domain']))} ({mark})")
     for s in a["dkim_signatures"]:
-        print(f"  DKIM signature      : {defang(s['domain']) or '?'} = {safe(s['result'])}")
+        print(f"  DKIM signature      : {safe(defang(s['domain'])) or '?'} = {safe(s['result'])}")
 
 
 def _print_indicators(r: dict) -> None:
     ind = r["indicators"]
     _section("Indicators (defanged)")
     for label, key in (("Public IPs", "ips_public"), ("Private IPs", "ips_private"),
+                       ("Receiving IPs", "ips_receiving"),
                        ("Sender domains", "sender_domains"), ("Relay domains", "relay_domains"),
                        ("Link domains", "link_domains")):
         print(f"  {label:<15}: {', '.join(safe(defang(x)) for x in ind[key]) or 'none'}")
@@ -86,7 +90,7 @@ def _print_attachments(atts: list) -> None:
         print("  none")
     for a in atts:
         where = f"  {C.GRAY}inside {safe(a['container'])}{C.RESET}" if a["container"] else ""
-        print(f"  {C.BOLD}{safe(a['filename'])}{C.RESET}  ({a['content_type']}, {a['size']} bytes){where}")
+        print(f"  {C.BOLD}{safe(a['filename'])}{C.RESET}  ({safe(a['content_type'])}, {a['size']} bytes){where}")
         if a["kind"] == "email" and a["inner"]:
             print(f"     Attached email - From: {safe(defang(a['inner']['from']))}  "
                   f"Subject: {safe(a['inner']['subject'])}")

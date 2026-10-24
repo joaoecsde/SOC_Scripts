@@ -3,12 +3,10 @@
 Every attacker-controlled string (finding text, previews, targets, names,
 errors, file name) goes through ``safe()`` and then ``defang_text()``, so a
 hostile PDF cannot hijack the terminal or leave a clickable link. The JSON
-export keeps raw values, except that extracted payload bytes are replaced by
-their size and SHA-256.
+export keeps raw values; extracted payloads appear as their size and SHA-256.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from typing import Union
@@ -101,19 +99,13 @@ def print_report(result: dict) -> None:
 
 
 def save_json(result: dict, path: Union[str, "os.PathLike[str]"]) -> None:
-    """Write the result as JSON (raw values, UTF-8, no payload bytes).
+    """Write the result as JSON (raw values, UTF-8).
 
-    Each ``extracted`` item has ``data`` replaced by ``size`` and ``sha256``.
+    ``extracted`` items already hold only ``size``, ``sha256`` and
+    ``payload_name``, never payload bytes (see ``pipeline.analyse_pdf``).
 
     Raises:
         OSError: If the file cannot be written (handled by the caller).
     """
-    out = dict(result)
-    out["extracted"] = []
-    for item in result.get("extracted", []):
-        slim = {k: v for k, v in item.items() if k != "data"}
-        slim["size"] = len(item["data"])
-        slim["sha256"] = hashlib.sha256(item["data"]).hexdigest()
-        out["extracted"].append(slim)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2, default=str, ensure_ascii=False)
+        json.dump(result, fh, indent=2, default=str, ensure_ascii=False)

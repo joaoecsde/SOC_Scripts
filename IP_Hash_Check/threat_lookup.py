@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -17,15 +18,38 @@ except ImportError:
 ABUSEIPDB_API_KEY  = os.environ.get("ABUSEIPDB_API_KEY")  or getattr(api_keys, "ABUSEIPDB_API_KEY", "")
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY") or getattr(api_keys, "VIRUSTOTAL_API_KEY", "")
 
-# ── Regex helpers ───────────────────────────────────────────────────────────────
-IPV4_RE  = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+def has_key(key: str) -> bool:
+    """Return True for a real key; unedited templates ("your_..._here") count as missing."""
+    return bool(key) and not key.startswith("your_")
+
+# ── Indicator helpers ───────────────────────────────────────────────────────────
 HASH_RE  = re.compile(r"^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$")
 
 def is_ip(value: str) -> bool:
-    return bool(IPV4_RE.match(value.strip()))
+    """Any valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(value.strip())
+        return True
+    except ValueError:
+        return False
+
+def is_public_ip(value: str) -> bool:
+    """False for private, loopback, link-local, multicast and other non-routable addresses."""
+    addr = ipaddress.ip_address(value.strip())
+    return addr.is_global and not addr.is_multicast
 
 def is_hash(value: str) -> bool:
     return bool(HASH_RE.match(value.strip()))
+
+def refang(value: str) -> str:
+    """Undo common IP defanging: 1[.]2(.)3[dot]4 -> 1.2.3.4, 2001[:]db8::1 -> 2001:db8::1.
+
+    Anything that is not an IP once refanged (e.g. evil[.]com) is kept
+    defanged, so it is never printed or exported as a live indicator.
+    """
+    value = value.strip()
+    ip = re.sub(r"(?i)\[\.\]|\(\.\)|\[dot\]|\(dot\)", ".", value).replace("[:]", ":")
+    return ip if is_ip(ip) else value
 
 
 # ── AbuseIPDB ──────────────────────────────────────────────────────────────────
@@ -106,6 +130,17 @@ GREEN  = "\033[92m"
 CYAN   = "\033[96m"
 GRAY   = "\033[90m"
 
+# Text from the APIs and the indicator file can contain terminal escape codes
+# (VirusTotal file names are chosen by whoever uploaded the file). Control
+# characters become "?" and invisible / right-to-left characters are shown
+# as <U+XXXX>, so nothing can recolour or rewrite the output.
+_BIDI_INVISIBLE = re.compile("[​-‏‪-‮⁦-⁩﻿]")
+_CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
+def safe(value) -> str:
+    text = _BIDI_INVISIBLE.sub(lambda m: f"<U+{ord(m.group()):04X}>", str(value))
+    return _CONTROL.sub("?", text)
+
 def color_score(score: Optional[int], thresholds=(25, 75)) -> str:
     if score is None:
         return f"{GRAY}N/A{RESET}"
@@ -121,20 +156,20 @@ def print_ip_result(ip: str, result: dict) -> None:
     print(f"{'─'*60}")
 
     if "error" in result:
-        print(f"  {RED}Error: {result['error']}{RESET}")
+        print(f"  {RED}Error: {safe(result['error'])}{RESET}")
         return
 
     score = result.get("abuse_score")
     print(f"  Abuse Score     : {color_score(score)} / 100")
-    print(f"  Total Reports   : {result.get('total_reports', 'N/A')}")
-    print(f"  Distinct Users  : {result.get('distinct_users', 'N/A')}")
-    print(f"  Country         : {result.get('country', 'N/A')}")
-    print(f"  ISP             : {result.get('isp', 'N/A')}")
-    print(f"  Domain          : {result.get('domain', 'N/A')}")
-    print(f"  Usage Type      : {result.get('usage_type', 'N/A')}")
-    print(f"  Is Tor          : {result.get('is_tor', 'N/A')}")
-    print(f"  Whitelisted     : {result.get('is_whitelisted', 'N/A')}")
-    print(f"  Last Reported   : {result.get('last_reported', 'N/A')}")
+    print(f"  Total Reports   : {safe(result.get('total_reports', 'N/A'))}")
+    print(f"  Distinct Users  : {safe(result.get('distinct_users', 'N/A'))}")
+    print(f"  Country         : {safe(result.get('country', 'N/A'))}")
+    print(f"  ISP             : {safe(result.get('isp', 'N/A'))}")
+    print(f"  Domain          : {safe(result.get('domain', 'N/A'))}")
+    print(f"  Usage Type      : {safe(result.get('usage_type', 'N/A'))}")
+    print(f"  Is Tor          : {safe(result.get('is_tor', 'N/A'))}")
+    print(f"  Whitelisted     : {safe(result.get('is_whitelisted', 'N/A'))}")
+    print(f"  Last Reported   : {safe(result.get('last_reported', 'N/A'))}")
 
 def print_hash_result(hash_val: str, result: dict) -> None:
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
@@ -142,7 +177,7 @@ def print_hash_result(hash_val: str, result: dict) -> None:
     print(f"{'─'*60}")
 
     if "error" in result:
-        print(f"  {RED}Error: {result['error']}{RESET}")
+        print(f"  {RED}Error: {safe(result['error'])}{RESET}")
         return
 
     malicious  = result.get("malicious", 0)
@@ -159,19 +194,19 @@ def print_hash_result(hash_val: str, result: dict) -> None:
 
     print(f"  Detection       : {detection_str} engines flagged as malicious")
     print(f"  Suspicious      : {suspicious}")
-    print(f"  Name            : {result.get('meaningful_name', 'N/A')}")
-    print(f"  File Type       : {result.get('file_type', 'N/A')}")
-    print(f"  File Size       : {result.get('file_size', 'N/A')} bytes")
-    print(f"  SHA256          : {result.get('hash_sha256', 'N/A')}")
-    print(f"  SHA1            : {result.get('hash_sha1', 'N/A')}")
-    print(f"  MD5             : {result.get('hash_md5', 'N/A')}")
+    print(f"  Name            : {safe(result.get('meaningful_name', 'N/A'))}")
+    print(f"  File Type       : {safe(result.get('file_type', 'N/A'))}")
+    print(f"  File Size       : {safe(result.get('file_size', 'N/A'))} bytes")
+    print(f"  SHA256          : {safe(result.get('hash_sha256', 'N/A'))}")
+    print(f"  SHA1            : {safe(result.get('hash_sha1', 'N/A'))}")
+    print(f"  MD5             : {safe(result.get('hash_md5', 'N/A'))}")
     known_names = result.get("file_names", [])
     if known_names:
-        print(f"  Known Names     : {', '.join(known_names)}")
-    print(f"  Times Submitted : {result.get('times_submitted', 'N/A')}")
-    print(f"  First Seen      : {result.get('first_submission', 'N/A')}")
-    print(f"  Last Seen       : {result.get('last_submission', 'N/A')}")
-    print(f"  VT Link         : {result.get('vt_link', 'N/A')}")
+        print(f"  Known Names     : {', '.join(safe(n) for n in known_names)}")
+    print(f"  Times Submitted : {safe(result.get('times_submitted', 'N/A'))}")
+    print(f"  First Seen      : {safe(result.get('first_submission', 'N/A'))}")
+    print(f"  Last Seen       : {safe(result.get('last_submission', 'N/A'))}")
+    print(f"  VT Link         : {safe(result.get('vt_link', 'N/A'))}")
 
 
 # ── JSON output ────────────────────────────────────────────────────────────────
@@ -188,11 +223,14 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:
-  python threat_lookup.py --abusekey YOUR_KEY --vtkey YOUR_KEY \\
-      --indicators 1.2.3.4 d41d8cd98f00b204e9800998ecf8427e
+  python threat_lookup.py --indicators 1.2.3.4 d41d8cd98f00b204e9800998ecf8427e
 
-  python threat_lookup.py --abusekey KEY --vtkey KEY \\
-      --file indicators.txt --json results.json
+  python threat_lookup.py --file indicators.txt --json results.json
+
+API keys are read from ../api_keys.py or the ABUSEIPDB_API_KEY /
+VIRUSTOTAL_API_KEY environment variables. --abusekey / --vtkey also exist,
+but a key typed on the command line ends up in shell history and the
+process list.
         """
     )
     parser.add_argument("--indicators", nargs="+", metavar="VALUE",
@@ -207,20 +245,20 @@ Examples:
                         help="Also save results to a JSON file")
     parser.add_argument("--max-age", type=int, default=90, metavar="DAYS",
                         help="AbuseIPDB: max age of reports in days (default: 90)")
-    parser.add_argument("--delay", type=float, default=0.5, metavar="SECONDS",
-                        help="Delay between API calls in seconds (default: 0.5)")
+    parser.add_argument("--delay", type=float, default=15.0, metavar="SECONDS",
+                        help="Delay between VirusTotal calls in seconds (default: 15, free tier = 4/min)")
 
     args = parser.parse_args()
 
-    # Collect indicators
-    indicators = list(args.indicators or [])
+    # Collect indicators (defanged IPs such as 1[.]2[.]3[.]4 are accepted)
+    indicators = [refang(i) for i in args.indicators or []]
     if args.file:
         try:
             with open(args.file) as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        indicators.append(line)
+                        indicators.append(refang(line))
         except FileNotFoundError:
             print(f"{RED}Error: File not found: {args.file}{RESET}")
             sys.exit(1)
@@ -232,12 +270,12 @@ Examples:
     # Validate API keys
     missing_keys = []
     for indicator in indicators:
-        if is_ip(indicator) and not args.abusekey:
-            missing_keys.append("--abusekey (AbuseIPDB) required for IP lookups")
+        if is_ip(indicator) and is_public_ip(indicator) and not has_key(args.abusekey):
+            missing_keys.append("AbuseIPDB key required for IP lookups (api_keys.py or ABUSEIPDB_API_KEY)")
             break
     for indicator in indicators:
-        if is_hash(indicator) and not args.vtkey:
-            missing_keys.append("--vtkey (VirusTotal) required for hash lookups")
+        if is_hash(indicator) and not has_key(args.vtkey):
+            missing_keys.append("VirusTotal key required for hash lookups (api_keys.py or VIRUSTOTAL_API_KEY)")
             break
     if missing_keys:
         for msg in set(missing_keys):
@@ -247,23 +285,33 @@ Examples:
     all_results = []
     print(f"\n{BOLD}Threat Intelligence Lookup — {len(indicators)} indicator(s){RESET}")
 
-    for i, indicator in enumerate(indicators):
+    # Only VirusTotal's free tier is tight (4/min); AbuseIPDB allows 1,000/day
+    vt_called = False
+    for indicator in indicators:
         indicator = indicator.strip()
-        if i > 0:
-            time.sleep(args.delay)
 
-        if is_ip(indicator):
+        if is_ip(indicator) and not is_public_ip(indicator):
+            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — private or reserved IP address "
+                  f"(internal network, loopback, etc.), so it has no AbuseIPDB reputation{RESET}")
+            all_results.append({"type": "ip", "indicator": indicator,
+                                "result": {"skipped": "Private or reserved IP address, not looked up"}})
+
+        elif is_ip(indicator):
             result = lookup_ip(indicator, args.abusekey, args.max_age)
             print_ip_result(indicator, result)
             all_results.append({"type": "ip", "indicator": indicator, "result": result})
 
         elif is_hash(indicator):
+            if vt_called:
+                print(f"\n{GRAY}Waiting {args.delay:g}s (VirusTotal free-tier limit)...{RESET}", flush=True)
+                time.sleep(args.delay)
+            vt_called = True
             result = lookup_hash(indicator, args.vtkey)
             print_hash_result(indicator, result)
             all_results.append({"type": "hash", "indicator": indicator, "result": result})
 
         else:
-            print(f"\n{YELLOW}Skipping '{indicator}' — not a valid IPv4 address or MD5/SHA1/SHA256 hash{RESET}")
+            print(f"\n{YELLOW}Skipping '{safe(indicator)}' — not a valid IP address or MD5/SHA1/SHA256 hash{RESET}")
             all_results.append({"type": "unknown", "indicator": indicator, "result": {"error": "Unrecognised format"}})
 
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
