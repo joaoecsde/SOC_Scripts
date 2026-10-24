@@ -59,6 +59,23 @@ class ReportTests(unittest.TestCase):
         r, _ = analyse({1: "<< /Type /Catalog >>"}, "<< /Root 1 0 R /Encrypt 9 0 R >>")
         self.assertIn("may be understated", report.render(r, Colors(False)))
 
+    def test_keyword_counts_before_findings(self):
+        r, _ = analyse(js_pdf("eval(1);"))
+        f = lambda kw: {"severity": "info", "keyword": kw, "object": 1, "finding": "x"}
+        r["findings"] = [f("/ObjStm"), f("/URI"), f("/URI"), f("/AA"), f("/URI"), f("/ObjStm")]
+        lines = report.render(r, Colors(False)).splitlines()
+        start = lines.index("Findings (6)") + 2
+        self.assertEqual([l.split() for l in lines[start:start + 3]],
+                         [["/URI", "3"], ["/ObjStm", "2"], ["/AA", "1"]])
+        self.assertTrue(lines[start + 3].lstrip().startswith("INFO"))
+
+    def test_no_keyword_counts_without_findings(self):
+        r, _ = analyse({1: "<< /Type /Catalog >>"})
+        r["findings"] = []
+        lines = report.render(r, Colors(False)).splitlines()
+        start = lines.index("Findings (0)") + 2
+        self.assertIn("No suspicious indicators found", lines[start])
+
     def test_json_has_no_payload_bytes(self):
         r, _ = analyse(js_pdf("eval(1);"))
         with tempfile.TemporaryDirectory() as d:
