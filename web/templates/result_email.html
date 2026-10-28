@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Email analysis · Investigation Tools{% endblock %}
+{% block content %}
+{% set vclass = {"HIGH": "v-high", "MEDIUM": "v-med", "LOW": "v-low"} %}
+{% set sclass = {"high": "s-high", "medium": "s-med", "low": "s-low", "info": "s-info"} %}
+{% set h = result.headers %}
+{% set auth = result.authentication %}
+<a class="back" href="/?tool=email">← New analysis</a>
+
+<div class="verdict {{ vclass.get(result.verdict, '') }}" data-verdict="{{ result.verdict }}">
+  <div class="ring" style="--pct: {{ result.risk_score | int }}%"><div><strong>{{ result.risk_score | int }}</strong><span>of 100</span></div></div>
+  <div>
+    <p class="vt">{{ result.verdict | capitalize }} risk</p>
+    <dl>
+      <dt>File</dt><dd>{{ result.source }}</dd>
+      <dt>From</dt><dd class="ioc">{% if h.from_name %}{{ h.from_name }} {% endif %}{{ h.from_addr | defang }}</dd>
+      <dt>Subject</dt><dd>{{ h.subject }}</dd>
+      <dt>Origin IP</dt><dd class="ioc">{{ (result.originating_ip or "unknown") | defang }}</dd>
+    </dl>
+  </div>
+  <a class="btn quiet" href="/job/{{ job.id }}/json">Download JSON</a>
+</div>
+
+{% for w in result.warnings %}<p class="notice">{{ w }}</p>{% endfor %}
+
+<div class="rtabs" role="tablist" data-tabs>
+  <button type="button" role="tab" aria-selected="true" aria-controls="t-findings">Findings<em>{{ result.findings | length }}</em></button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-headers">Headers</button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-chain">Received chain</button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-links">Links<em>{{ result.links | length }}</em></button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-attachments">Attachments<em>{{ result.attachments | length }}</em></button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-indicators">Indicators</button>
+  {% if result.online_ip_results %}<button type="button" role="tab" aria-selected="false" aria-controls="t-reputation">Reputation<em>{{ result.online_ip_results | length }}</em></button>{% endif %}
+</div>
+
+<section class="panel" id="t-findings" role="tabpanel">
+  {% if result.findings %}
+  <div class="scroll"><table>
+    <thead><tr><th>Severity</th><th>Category</th><th>Finding</th><th class="pts">Points</th></tr></thead>
+    <tbody>
+    {% for sev in ["high", "medium", "low", "info"] %}
+    {% for f in result.findings | selectattr("severity", "equalto", sev) | sort(attribute="points", reverse=True) %}
+    <tr><td><span class="sev {{ sclass[sev] }}">{{ sev | capitalize }}</span></td><td>{{ f.category | capitalize }}</td><td>{{ f.finding }}</td><td class="pts">{{ f.points }}</td></tr>
+    {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No suspicious indicators found.</p>{% endif %}
+</section>
+
+<section class="panel" id="t-headers" role="tabpanel" hidden>
+  <dl>
+    <dt>From</dt><dd class="ioc">{{ h.from | defang }}</dd>
+    {% if h.reply_to %}<dt>Reply-To</dt><dd class="ioc">{{ h.reply_to | defang }}</dd>{% endif %}
+    {% if h.return_path %}<dt>Return-Path</dt><dd class="ioc">{{ h.return_path | defang }}</dd>{% endif %}
+    <dt>To</dt><dd class="ioc">{{ h.to | defang }}</dd>
+    <dt>Subject</dt><dd>{{ h.subject }}</dd>
+    <dt>Date</dt><dd>{{ h.date }}</dd>
+    <dt>Message-ID</dt><dd class="ioc">{{ h.message_id | defang }}</dd>
+    {% if h.x_mailer %}<dt>X-Mailer</dt><dd>{{ h.x_mailer }}</dd>{% endif %}
+    {% if h.x_originating_ip %}<dt>X-Originating-IP</dt><dd class="ioc">{{ h.x_originating_ip | defang }}</dd>{% endif %}
+  </dl>
+  <h3>Authentication</h3>
+  <dl>
+    <dt>SPF</dt><dd>{{ auth.spf }}{% if auth.spf_domain %} for <span class="ioc">{{ auth.spf_domain | defang }}</span>{% endif %}{% if auth.spf_aligned %}, aligned with From{% endif %}</dd>
+    <dt>DKIM</dt><dd>{{ auth.dkim }}{% if auth.dkim_domain %} for <span class="ioc">{{ auth.dkim_domain | defang }}</span>{% endif %}{% if auth.dkim_aligned %}, aligned with From{% endif %}</dd>
+    <dt>DMARC</dt><dd>{{ auth.dmarc }}</dd>
+  </dl>
+</section>
+
+<section class="panel" id="t-chain" role="tabpanel" hidden>
+  {% if result.received_chain %}
+  <div class="scroll"><table>
+    <thead><tr><th>Hop</th><th>From</th><th>By</th><th>IPs</th><th>Time</th></tr></thead>
+    <tbody>
+    {% for hop in result.received_chain %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td class="ioc">{{ (hop["from"] or "") | defang }}</td>
+      <td class="ioc">{{ (hop.by or "") | defang }}</td>
+      <td class="ioc">{% for ip in hop.ips %}{{ ip | defang }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+      <td>{{ hop.timestamp or "" }}{% if hop.delay_s %}<span class="sub">{{ hop.delay_s | int }} s after the previous hop</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No Received headers.</p>{% endif %}
+</section>
+
+<section class="panel" id="t-links" role="tabpanel" hidden>
+  {% if result.links %}
+  <div class="scroll"><table>
+    <thead><tr><th>Link text</th><th>Goes to</th></tr></thead>
+    <tbody>
+    {% for l in result.links %}
+    <tr><td>{{ (l.text or "") | defang }}</td><td class="ioc">{{ l.url | defang }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No links.</p>{% endif %}
+</section>
+
+<section class="panel" id="t-attachments" role="tabpanel" hidden>
+  {% if result.attachments %}
+  <div class="scroll"><table>
+    <thead><tr><th>File</th><th>SHA-256</th><th>VirusTotal</th></tr></thead>
+    <tbody>
+    {% for a in result.attachments %}
+    <tr>
+      <td>{{ a.filename }}<span class="sub">{{ a.content_type }}, {{ a.size }} bytes{% if a.container %}, inside {{ a.container }}{% endif %}</span>
+        {% if a.inner %}<span class="sub">Attached email from <span class="ioc">{{ a.inner["from"] | defang }}</span>: {{ a.inner.subject }}</span>{% endif %}
+        {% if a.flags %}<ul class="flags">{% for fl in a.flags %}<li>{{ fl.flag }}</li>{% endfor %}</ul>{% endif %}</td>
+      <td class="mono">{{ a.sha256 }}</td>
+      <td>{% if not a.online %}<span class="s-info">Not looked up</span>
+        {% elif a.online.error %}{{ a.online.error }}
+        {% else %}<span class="{{ 's-high' if a.online.malicious else 's-low' }}">{{ a.online.malicious }} of {{ a.online.total }} malicious</span>
+          {% if a.online.link %}<br><a href="{{ a.online.link }}" target="_blank" rel="noopener noreferrer">View on VirusTotal</a>{% endif %}{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No attachments.</p>{% endif %}
+</section>
+
+<section class="panel" id="t-indicators" role="tabpanel" hidden>
+  {% set ind = result.indicators %}
+  {% set groups = [("Public IPs", ind.ips_public), ("Private IPs", ind.ips_private),
+                   ("Sender domains", ind.sender_domains), ("Relay domains", ind.relay_domains),
+                   ("Link domains", ind.link_domains), ("URLs", ind.urls), ("Attachment SHA-256", ind.sha256)] %}
+  <dl>
+    {% for title, values in groups if values %}
+    <dt>{{ title }}</dt><dd><ul class="list">{% for v in values %}<li class="ioc">{{ v | defang }}</li>{% endfor %}</ul></dd>
+    {% else %}<dt>None</dt><dd>No indicators extracted.</dd>
+    {% endfor %}
+  </dl>
+</section>
+
+{% if result.online_ip_results %}
+<section class="panel" id="t-reputation" role="tabpanel" hidden>
+  <div class="scroll"><table>
+    <thead><tr><th>IP</th><th>Abuse score</th><th>Reports</th><th>Country</th><th>ISP</th><th>Tor</th></tr></thead>
+    <tbody>
+    {% for ip, r in result.online_ip_results.items() %}
+    <tr>
+      <td class="ioc">{{ ip | defang }}</td>
+      {% if r.error %}<td colspan="5">{{ r.error }}</td>
+      {% else %}
+      {% set s = r.abuse_score or 0 %}
+      <td><strong class="{{ 's-high' if s >= 75 else 's-med' if s >= 25 else 's-low' }}">{{ s }}</strong></td>
+      <td>{{ r.reports if r.reports is not none else "" }}</td>
+      <td>{{ r.country or "" }}</td>
+      <td>{{ r.isp or "" }}</td>
+      <td>{{ "Yes" if r.is_tor else "No" }}</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+{% endblock %}

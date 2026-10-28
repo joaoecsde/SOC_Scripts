@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}PDF analysis · Investigation Tools{% endblock %}
+{% block content %}
+{% set vclass = {"HIGH": "v-high", "MEDIUM": "v-med", "LOW": "v-low"} %}
+{% set sclass = {"high": "s-high", "medium": "s-med", "low": "s-low", "info": "s-info"} %}
+<a class="back" href="/?tool=pdf">← New analysis</a>
+
+<div class="verdict no-ring {{ vclass.get(result.verdict, '') }}" data-verdict="{{ result.verdict }}">
+  <div>
+    <p class="badge">{{ result.verdict | capitalize }} risk</p>
+    <dl>
+      <dt>File</dt><dd>{{ result.file }}</dd>
+      <dt>Size</dt><dd>{{ result.size }} bytes</dd>
+      <dt>SHA-256</dt><dd class="mono">{{ result.sha256 }}</dd>
+    </dl>
+  </div>
+  <a class="btn quiet" href="/job/{{ job.id }}/json">Download JSON</a>
+</div>
+
+{% if result.encrypted %}<p class="notice">Encrypted PDF: strings and streams could not be decoded, so the verdict may be understated.</p>{% endif %}
+{% if result.partial %}<p class="notice">Parsing was partial, so some content may be missing from the results.</p>{% endif %}
+{% for e in result.errors %}<p class="notice bad">{{ e }}</p>{% endfor %}
+
+{% if job.downloads.get("payloads") or result.payload_error %}
+<div class="actions">
+  {% if job.downloads.get("payloads") %}<a class="btn" href="/job/{{ job.id }}/payloads">Download payloads.zip (password: infected)</a>
+  {% elif result.payload_error %}<p class="notice bad">{{ result.payload_error }}</p>{% endif %}
+</div>
+{% endif %}
+
+<div class="rtabs" role="tablist" data-tabs>
+  <button type="button" role="tab" aria-selected="true" aria-controls="t-findings">Findings<em>{{ result.findings | length }}</em></button>
+  <button type="button" role="tab" aria-selected="false" aria-controls="t-extracted">Extracted<em>{{ result.extracted | length }}</em></button>
+</div>
+
+<section class="panel" id="t-findings" role="tabpanel">
+  {% if result.findings %}
+  <div class="scroll"><table>
+    <thead><tr><th>Severity</th><th>Keyword</th><th>Finding</th><th class="pts">Object</th></tr></thead>
+    <tbody>
+    {% for sev in ["high", "medium", "low", "info"] %}
+    {% for f in result.findings | selectattr("severity", "equalto", sev) %}
+    <tr>
+      <td><span class="sev {{ sclass[sev] }}">{{ sev | capitalize }}</span></td>
+      <td class="mono">{{ f.keyword }}</td>
+      <td>{{ f.finding }}{% if f.target %}<span class="sub ioc">{{ f.target | defang }}</span>{% endif %}{% if f.preview %}<span class="sub mono">{{ f.preview | defang }}</span>{% endif %}</td>
+      <td class="pts">{{ f.object if f.object is not none else "" }}</td>
+    </tr>
+    {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No suspicious content found.</p>{% endif %}
+</section>
+
+<section class="panel" id="t-extracted" role="tabpanel" hidden>
+  {% if result.extracted %}
+  <div class="scroll"><table>
+    <thead><tr><th>Kind</th><th>Name</th><th class="pts">Size</th><th>SHA-256</th></tr></thead>
+    <tbody>
+    {% for x in result.extracted %}
+    <tr><td>{{ x.kind | capitalize }}</td><td>{{ x.name or "" }}</td><td class="pts">{{ x.size }}</td><td class="mono">{{ x.sha256 }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">Nothing was extracted.</p>{% endif %}
+</section>
+{% endblock %}

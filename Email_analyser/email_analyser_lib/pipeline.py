@@ -13,7 +13,7 @@ from .auth import parse_auth
 from .headers import extract_headers, originating_ip, parse_received
 from .links import extract_links
 from .rules import evaluate, score, verdict
-from .utils import domain_of, is_ip, is_public_ip, valid_ips
+from .utils import defang, domain_of, is_ip, is_public_ip, valid_ips
 
 
 def collect_indicators(headers: dict, hops: list, links: list, attachments: list) -> dict:
@@ -67,7 +67,8 @@ def collect_indicators(headers: dict, hops: list, links: list, attachments: list
     }
 
 
-def run_online(indicators: dict, attachments: list, keys: dict, delay: float, max_age: int = 90) -> dict:
+def run_online(indicators: dict, attachments: list, keys: dict, delay: float, max_age: int = 90,
+               progress=None) -> dict:
     """Enrich public IPs (AbuseIPDB) and attachment hashes (VirusTotal).
 
     Each service runs independently, so having only one key still works.
@@ -80,28 +81,51 @@ def run_online(indicators: dict, attachments: list, keys: dict, delay: float, ma
         keys: ``{"abuseipdb": str, "virustotal": str}``.
         delay: Seconds between VirusTotal calls (free tier: 4 per minute).
         max_age: AbuseIPDB report age limit in days.
+        progress: Optional ``progress(done, total, label)`` callback, called
+            before and after every lookup (AbuseIPDB or VirusTotal) and before
+            each VirusTotal wait; ``label`` names the current indicator.
 
     Returns:
         Mapping of IP -> AbuseIPDB result.
     """
     online_ips = {}
-    if online_mod.has_key(keys.get("abuseipdb", "")):
+    use_abuse = online_mod.has_key(keys.get("abuseipdb", ""))
+    use_vt = online_mod.has_key(keys.get("virustotal", ""))
+    total = (len(indicators["ips_public"]) if use_abuse else 0) + \
+            (sum(1 for a in attachments if a["kind"] == "file" and a["size"]) if use_vt else 0)
+    done = 0
+
+    def report(label: str) -> None:
+        if progress:
+            progress(done, total, label)
+
+    if use_abuse:
         for ip in indicators["ips_public"]:
+            label = f"Checking {defang(ip)} on AbuseIPDB"
+            report(label)
             online_ips[ip] = online_mod.check_ip(ip, keys["abuseipdb"], max_age)
+            done += 1
+            report(label)
             time.sleep(0.5)   # AbuseIPDB's limit is daily, so a short pause is enough.
-    if online_mod.has_key(keys.get("virustotal", "")):
+    if use_vt:
         first = True
         for a in attachments:
             if a["kind"] != "file" or not a["size"]:
                 continue
             if not first:
+                report(f"Waiting {delay:g} s for VirusTotal's rate limit")
                 time.sleep(delay)
             first = False
+            label = f"Checking attachment {a['filename'] or a['sha256'][:12]} on VirusTotal"
+            report(label)
             a["online"] = online_mod.check_hash(a["sha256"], keys["virustotal"])
+            done += 1
+            report(label)
     return online_ips
 
 
-def analyse_message(msg, keys: dict = None, delay: float = 15.0, warnings: list = None) -> dict:
+def analyse_message(msg, keys: dict = None, delay: float = 15.0, warnings: list = None,
+                    progress=None) -> dict:
     """Analyse a parsed email end to end.
 
     Order matters: authentication needs the From domain, indicators need
@@ -112,6 +136,8 @@ def analyse_message(msg, keys: dict = None, delay: float = 15.0, warnings: list 
         keys: API keys to enable online lookups; ``None`` means offline.
         delay: Seconds between VirusTotal calls when online.
         warnings: Notes from the loader, passed through to the report.
+        progress: Optional ``progress(done, total, label)`` callback for online
+            lookups; never called when ``keys`` is ``None``.
 
     Returns:
         Result dict with every stage's output, ``findings``,
@@ -125,7 +151,7 @@ def analyse_message(msg, keys: dict = None, delay: float = 15.0, warnings: list 
     attachments = inspect_attachments(msg)
     indicators = collect_indicators(headers, hops, links, attachments)
 
-    online_ips = run_online(indicators, attachments, keys, delay) if keys else {}
+    online_ips = run_online(indicators, attachments, keys, delay, progress=progress) if keys else {}
 
     findings = evaluate(headers, hops, auth, orig_ip, links, attachments, online_ips)
     total, breakdown = score(findings)

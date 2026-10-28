@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}IP and hash results · Investigation Tools{% endblock %}
+{% block content %}
+{% set n = namespace(malicious=0, skipped=0, failed=0) %}
+{% for row in result %}
+  {% set r = row.result %}
+  {% if r.error %}{% set n.failed = n.failed + 1 %}
+  {% elif r.skipped %}{% set n.skipped = n.skipped + 1 %}
+  {% elif (row.type == "ip" and (r.abuse_score or 0) >= 75) or (row.type == "hash" and (r.malicious or 0) > 0) %}{% set n.malicious = n.malicious + 1 %}
+  {% endif %}
+{% endfor %}
+<a class="back" href="/?tool=ioc">← New analysis</a>
+
+<div class="verdict no-ring">
+  <div>
+    <p class="vt" style="color:var(--ice)">IP and hash results</p>
+    <p class="summary"><strong>{{ result | length }} checked</strong>: {{ n.malicious }} malicious{% if n.skipped %}, {{ n.skipped }} skipped{% endif %}{% if n.failed %}, {{ n.failed }} failed{% endif %}</p>
+  </div>
+  <a class="btn quiet" href="/job/{{ job.id }}/json">Download JSON</a>
+</div>
+
+{% for row in result %}
+{% set r = row.result %}
+<article class="card">
+  <header>
+    <span class="kind">{{ {"ip": "IP address", "hash": "Hash"}.get(row.type, "Unrecognised") }}</span>
+    <span class="ioc">{{ row.indicator | defang }}</span>
+  </header>
+  {% if r.error %}<p class="msg bad">{{ r.error }}</p>
+  {% elif r.skipped %}<p class="msg">{{ r.skipped }}</p>
+  {% elif row.type == "ip" %}
+    {% set s = r.abuse_score or 0 %}
+    <dl>
+      <dt>Abuse score</dt><dd><span class="big {{ 's-high' if s >= 75 else 's-med' if s >= 25 else 's-low' }}">{{ s }}</span> <span class="s-info">of 100</span></dd>
+      <dt>Total reports</dt><dd>{{ r.total_reports if r.total_reports is not none else "Unknown" }}</dd>
+      <dt>Distinct users</dt><dd>{{ r.distinct_users if r.distinct_users is not none else "Unknown" }}</dd>
+      <dt>Country</dt><dd>{{ r.country or "Unknown" }}</dd>
+      <dt>ISP</dt><dd>{{ r.isp or "Unknown" }}</dd>
+      <dt>Usage type</dt><dd>{{ r.usage_type or "Unknown" }}</dd>
+      <dt>Domain</dt><dd class="ioc">{{ (r.domain or "") | defang or "Unknown" }}</dd>
+      <dt>Tor exit node</dt><dd>{{ "Yes" if r.is_tor else "No" }}</dd>
+      {% if r.is_whitelisted %}<dt>Allow list</dt><dd>On AbuseIPDB's allow list</dd>{% endif %}
+      <dt>Last reported</dt><dd>{{ r.last_reported or "Never" }}</dd>
+    </dl>
+  {% else %}
+    {% set total = (r.malicious or 0) + (r.suspicious or 0) + (r.undetected or 0) + (r.harmless or 0) %}
+    <dl>
+      <dt>Detections</dt><dd><span class="big {{ 's-high' if r.malicious else 's-med' if r.suspicious else 's-low' }}">{{ r.malicious or 0 }}</span> malicious, {{ r.suspicious or 0 }} suspicious <span class="s-info">of {{ total }} engines</span></dd>
+      <dt>File type</dt><dd>{{ r.file_type or "Unknown" }}</dd>
+      <dt>Size</dt><dd>{{ "{} bytes".format(r.file_size) if r.file_size is not none else "Unknown" }}</dd>
+      <dt>Name</dt><dd>{{ r.meaningful_name or "Unknown" }}</dd>
+      {% if r.file_names %}<dt>Known names</dt><dd>{{ r.file_names | join(", ") }}</dd>{% endif %}
+      <dt>First submitted</dt><dd>{{ r.first_submission | utc }}</dd>
+      <dt>Last submitted</dt><dd>{{ r.last_submission | utc }}</dd>
+      {% if r.times_submitted is not none %}<dt>Times submitted</dt><dd>{{ r.times_submitted }}</dd>{% endif %}
+    </dl>
+    {% if r.vt_link %}<a class="ext" href="{{ r.vt_link }}" target="_blank" rel="noopener noreferrer">View on VirusTotal</a>{% endif %}
+  {% endif %}
+</article>
+{% endfor %}
+{% endblock %}
