@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from email.message import EmailMessage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -363,6 +364,31 @@ class CommandLine(unittest.TestCase):
         # stdout is not a terminal here, so colours are off and any ESC is injected.
         self.assertNotIn("\x1b", r.stdout)
         self.assertIn("SPF envelope domain", r.stdout)
+
+
+class OnlineProgressTests(unittest.TestCase):
+
+    def parsed(self):
+        msg, _ = parse_email(bytes(build([("From", "a@b.com")], attachments=[(b"payload", "a.bin")])))
+        return msg
+
+    def test_online_progress_callback(self):
+        calls = []
+        keys = {"abuseipdb": "k" * 20, "virustotal": "k" * 20}
+        with mock.patch("email_analyser_lib.online.check_ip", return_value={}), \
+             mock.patch("email_analyser_lib.online.check_hash", return_value={}), \
+             mock.patch("email_analyser_lib.pipeline.time.sleep"):
+            analyse_message(self.parsed(), keys=keys, delay=0,
+                            progress=lambda d, t, label: calls.append((d, t, label)))
+        self.assertEqual(calls[0][:2], (0, 2))
+        self.assertEqual(calls[-1], (2, 2, "Checking attachment a.bin on VirusTotal"))
+        self.assertTrue(any(label.startswith("Checking ") and "[.]" in label
+                            and label.endswith(" on AbuseIPDB") for _, _, label in calls))
+
+    def test_no_progress_when_offline(self):
+        calls = []
+        analyse_message(self.parsed(), progress=lambda d, t, label: calls.append((d, t)))
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
