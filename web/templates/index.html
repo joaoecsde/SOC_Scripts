@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% macro err(name) %}{% if errors.get(name) %}<p class="error" role="alert">{{ errors[name] }}</p>{% endif %}{% endmacro %}
+{% macro tabattrs(name) %}data-t="{{ name }}" aria-selected="{{ 'true' if tab == name else 'false' }}"{% endmacro %}
+{% macro pane(name) %}class="pane{% if tab == name %} on{% endif %}" id="p-{{ name }}"{% if tab != name %} disabled{% endif %}{% endmacro %}
+{% block content %}
+<section id="landing">
+  <div class="hero">
+    <svg class="shield" viewBox="0 0 64 72" aria-hidden="true">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#76A8FF"/><stop offset="1" stop-color="#2F5FD0"/></linearGradient></defs>
+      <path d="M32 2 60 12v22c0 18-12 30-28 36C16 64 4 52 4 34V12z" fill="url(#g)"/>
+      <path d="M20 36l8 8 16-17" fill="none" stroke="#071330" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1>Investigation Tools</h1>
+    <p class="lede">Analyse a suspicious email, look up IPs and hashes, or inspect a PDF. Everything runs on this machine, and files are read, never opened.</p>
+  </div>
+
+  <div class="switch" role="tablist">
+    <a role="tab" href="/?tool=email" {{ tabattrs("email") }}>Email<small>.eml or headers</small></a>
+    <a role="tab" href="/?tool=ioc" {{ tabattrs("ioc") }}>IP / Hash<small>AbuseIPDB, VirusTotal</small></a>
+    <a role="tab" href="/?tool=pdf" {{ tabattrs("pdf") }}>PDF<small>scripts, embedded files</small></a>
+  </div>
+
+  <form id="tool-form" method="post" action="/analyse/{{ tab }}" enctype="multipart/form-data">
+    <input type="hidden" name="tool" value="{{ tab }}">
+
+    <!-- Email -->
+    <fieldset {{ pane("email") }}>
+      <label class="drop" data-drop>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+        <p><strong>Drop an email here</strong> or choose a file. Use .eml, or a .txt with the raw headers.</p>
+        <p class="chosen" aria-live="polite"></p>
+        <input class="sr-only" type="file" name="file" accept=".eml,.txt,message/rfc822,text/plain">
+        <span class="btn">Choose email</span>
+      </label>
+      {{ err("file") if tab == "email" }}
+      <div class="opts">
+        <label class="opt"><input type="checkbox" name="online" id="online" data-reveal="onlineFields"{% if form.online %} checked{% endif %}>
+          <div><b>Look up IPs and attachments online</b><span>Sends public IPs to AbuseIPDB and attachment hashes to VirusTotal. The email itself never leaves this machine.</span></div></label>
+        <div class="reveal{% if form.online or errors.get('online') %} open{% endif %}" id="onlineFields"><div>
+          {{ err("online") }}
+          <div class="fields">
+            <div class="field"><label for="k1">AbuseIPDB API key</label><input class="txt key" id="k1" name="abuseipdb_key" type="password" placeholder="Paste key" autocomplete="off" spellcheck="false"></div>
+            <div class="field"><label for="k2">VirusTotal API key</label><input class="txt key" id="k2" name="virustotal_key" type="password" placeholder="Paste key" autocomplete="off" spellcheck="false"></div>
+            <div class="inline">Wait <input class="txt" name="delay" value="{{ form.delay or '15' }}" inputmode="decimal" aria-label="seconds"> seconds between VirusTotal lookups (free tier allows 4 a minute)</div>
+            {{ err("delay") if tab == "email" }}
+          </div>
+        </div></div>
+      </div>
+      <div class="go"><button class="btn" type="submit">Analyse email</button></div>
+    </fieldset>
+
+    <!-- IP / Hash -->
+    <fieldset {{ pane("ioc") }}>
+      <textarea name="indicators" aria-label="Indicators" spellcheck="false" placeholder="185[.]220[.]101[.]4&#10;44d88612fea8a8f36de82e1278abb02f&#10;&#10;One IP or hash per line. Defanged values work.">{{ form.indicators }}</textarea>
+      {{ err("indicators") }}
+      <div class="opts">
+        <div class="fields" style="padding:16px 0 12px">
+          <div class="field"><label for="k3">AbuseIPDB API key, needed for IPs</label><input class="txt key" id="k3" name="abuseipdb_key" type="password" placeholder="Paste key" autocomplete="off" spellcheck="false">{{ err("abuseipdb_key") }}</div>
+          <div class="field"><label for="k4">VirusTotal API key, needed for hashes</label><input class="txt key" id="k4" name="virustotal_key" type="password" placeholder="Paste key" autocomplete="off" spellcheck="false">{{ err("virustotal_key") }}</div>
+        </div>
+        <p class="keys-note" style="padding-left:0">Keys are kept only until you close this tab.</p>
+        <details{% if tab == "ioc" and (errors.get("max_age") or errors.get("delay")) %} open{% endif %}>
+          <summary>More settings</summary>
+          <div class="fields" style="padding-left:0">
+            <div class="inline">Count AbuseIPDB reports from the last <input class="txt" name="max_age" value="{{ form.max_age or '90' }}" inputmode="numeric" aria-label="days"> days</div>
+            {{ err("max_age") }}
+            <div class="inline">Wait <input class="txt" name="delay" value="{{ form.delay or '15' }}" inputmode="decimal" aria-label="seconds"> seconds between VirusTotal lookups</div>
+            {{ err("delay") if tab == "ioc" }}
+          </div>
+        </details>
+      </div>
+      <div class="go"><button class="btn" type="submit">Check indicators</button></div>
+    </fieldset>
+
+    <!-- PDF -->
+    <fieldset {{ pane("pdf") }}>
+      <label class="drop" data-drop>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 14h6M9 17h4"/></svg>
+        <p><strong>Drop a PDF here</strong> or choose a file. Nothing inside it is run.</p>
+        <p class="chosen" aria-live="polite"></p>
+        <input class="sr-only" type="file" name="file" accept=".pdf,application/pdf">
+        <span class="btn">Choose PDF</span>
+      </label>
+      {{ err("file") if tab == "pdf" }}
+      <div class="opts">
+        <label class="opt"><input type="checkbox" name="extract"{% if form.extract %} checked{% endif %}>
+          <div><b>Extract hidden content</b><span>Saves any JavaScript, embedded files and media found in the PDF as a zip you can download.</span></div></label>
+      </div>
+      <div class="go"><button class="btn" type="submit">Analyse PDF</button></div>
+    </fieldset>
+  </form>
+
+  <div class="about">
+    {% set abouts = {
+      "email": ("What the email analysis checks", "Every finding adds points to a risk score from 0 to 100, so you can see why an email was flagged."),
+      "ioc": ("What the IP and hash lookup shows", "Each value is checked against AbuseIPDB or VirusTotal and shown with the details an analyst needs."),
+      "pdf": ("What the PDF analysis checks", "The file is taken apart without being opened, and graded high, medium or low."),
+    } %}
+    <h2 id="aboutTitle">{{ abouts[tab][0] }}</h2>
+    <p id="aboutLede">{{ abouts[tab][1] }}</p>
+
+    <div class="feats{% if tab == 'email' %} on{% endif %}" id="f-email" data-title="{{ abouts.email[0] }}" data-lede="{{ abouts.email[1] }}">
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>Sender authentication</h3><p>Reads SPF, every DKIM signature and DMARC, and checks they line up with the From address.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M3 20c0-3.3 2.7-6 6-6"/><path d="m15 15 6 6M21 15l-6 6"/></svg></div>
+        <h3>Impersonation</h3><p>Catches lookalike domains like paypa1.com, brand names in the display name and punycode tricks.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8M18 8l-5 8"/></svg></div>
+        <h3>Origin server</h3><p>Follows the Received chain to find the IP that really sent the email, and spots forged or delayed hops.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></div>
+        <h3>Links</h3><p>Flags links whose text says one site but go to another, bare-IP links, shorteners and risky downloads.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7L10 17.4a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg></div>
+        <h3>Attachments</h3><p>Hashes every file and spots double extensions, renamed executables and HTML smuggling, without opening anything.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div>
+        <h3>Reputation, if you want it</h3><p>With your API keys, looks up sender IPs on AbuseIPDB and attachment hashes on VirusTotal.</p></div>
+    </div>
+
+    <div class="feats{% if tab == 'ioc' %} on{% endif %}" id="f-ioc" data-title="{{ abouts.ioc[0] }}" data-lede="{{ abouts.ioc[1] }}">
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m16 15 2 2 4-4"/></svg></div>
+        <h3>Mix IPs and hashes</h3><p>Paste a list and each line is recognised as an IP, MD5, SHA-1 or SHA-256 on its own.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H5v16h3M16 4h3v16h-3"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/></svg></div>
+        <h3>Defanged input works</h3><p>Copy straight from a ticket. Values like 1[.]2[.]3[.]4 or hxxp are cleaned up before the lookup.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="M12 8v5M12 16h.01"/></svg></div>
+        <h3>IP abuse score</h3><p>AbuseIPDB confidence score, number of reports and how many people filed them, and when it was last reported.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-6 7 6v11"/><path d="M10 21v-6h4v6"/></svg></div>
+        <h3>Who owns the IP</h3><p>Country, ISP, domain and usage type, plus whether it is a Tor exit node or on AbuseIPDB's allow list.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 15v-3M12 15V9M16 15v-5"/></svg></div>
+        <h3>Hash detections</h3><p>How many VirusTotal engines call the file malicious or suspicious, its type, size and known file names.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg></div>
+        <h3>File history</h3><p>When the file was first and last submitted, how often, and a direct link to its VirusTotal page.</p></div>
+    </div>
+
+    <div class="feats{% if tab == 'pdf' %} on{% endif %}" id="f-pdf" data-title="{{ abouts.pdf[0] }}" data-lede="{{ abouts.pdf[1] }}">
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg></div>
+        <h3>JavaScript</h3><p>Finds scripts anywhere in the file, including ones hidden in object streams or behind escaped names.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
+        <h3>Runs on open</h3><p>Flags actions that fire by themselves when the PDF is opened, like OpenAction and document events.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M10 14 21 3M18 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg></div>
+        <h3>Risky actions</h3><p>Launching programs, opening links, sending form data out, and jumping to other documents.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg></div>
+        <h3>Embedded files</h3><p>Lists files hidden inside the PDF and calls out executables and scripts, even when they are renamed.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12c2-6 4-6 6 0s4 6 6 0 4-6 4-6"/><path d="M4 18h16"/></svg></div>
+        <h3>Obfuscation</h3><p>Spots eval, unescape, character-code tricks, shellcode patterns and long hex strings inside scripts.</p></div>
+      <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+        <h3>Fully offline</h3><p>Nothing is sent anywhere and nothing is run. Extracted content goes into a password-protected zip.</p></div>
+    </div>
+  </div>
+</section>
+{% endblock %}

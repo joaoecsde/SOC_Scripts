@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Analysing · Investigation Tools{% endblock %}
+{% block head %}<noscript><meta http-equiv="refresh" content="2"></noscript>{% endblock %}
+{% block content %}
+{% set names = {"email": "email", "ioc": "IPs and hashes", "pdf": "PDF"} %}
+<a class="back" href="/?tool={{ job.tool }}">← New analysis</a>
+<div class="progress" data-job-status="/job/{{ job.id }}/status">
+  <h1>Analysing {{ names.get(job.tool, "") }}</h1>
+  <div class="track{% if not status.total %} indeterminate{% endif %}" role="progressbar" aria-label="Progress"
+       {% if status.total %}aria-valuemin="0" aria-valuemax="{{ status.total }}" aria-valuenow="{{ status.done }}"{% endif %}>
+    <div id="bar"{% if status.total %} style="width: {{ (100 * status.done / status.total) | int }}%"{% endif %}></div>
+  </div>
+  <p id="count">{% if status.total %}{{ status.done }} of {{ status.total }} done{% else %}Analysing…{% endif %}</p>
+  <p id="label">{{ status.label }}</p>
+</div>
+{% endblock %}
