@@ -119,9 +119,5 @@ Done:
 
 Ideas for next:
 
-- [ ] Shodan IP enrichment
-- [ ] WHOIS lookup
-- [ ] IOC extractor from text/emails
-- [ ] Log parser utilities
 - [ ] Web UI: history of past analyses
 - [ ] Web UI: accounts with encrypted stored API keys
