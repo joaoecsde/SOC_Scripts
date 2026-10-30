@@ -23,6 +23,21 @@ import samples                                   # noqa: E402
 SECRET = "KEYSECRET1234567890abcdef"
 
 
+class ExitSignalTests(unittest.TestCase):
+    def installed(self, fake_signal):
+        with mock.patch.object(webapp, "signal", fake_signal):
+            webapp.install_exit_handlers()
+        return [call.args[0] for call in fake_signal.signal.call_args_list]
+
+    def test_windows_has_no_sighup(self):
+        fake = mock.Mock(spec=["SIGTERM", "SIGBREAK", "signal"])
+        self.assertEqual(self.installed(fake), [fake.SIGTERM, fake.SIGBREAK])
+
+    def test_unix_has_no_sigbreak(self):
+        fake = mock.Mock(spec=["SIGTERM", "SIGHUP", "signal"])
+        self.assertEqual(self.installed(fake), [fake.SIGTERM, fake.SIGHUP])
+
+
 class AppTests(unittest.TestCase):
     def setUp(self):
         self.store = jobs.JobStore()

@@ -33,6 +33,17 @@ DEFAULT_MAX_AGE = "90"
 EXPIRED = "This result has expired or never existed. Run the analysis again."
 
 
+def install_exit_handlers() -> None:
+    """Turn kill and closed-terminal signals into a normal exit.
+
+    This lets the JobStore's atexit cleanup run, as it does for Ctrl+C.
+    SIGHUP is Unix only; Windows raises SIGBREAK when the console closes.
+    """
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: sys.exit(0))
+
+
 def utc_date(epoch) -> str:
     """Format a Unix timestamp (as VirusTotal returns it) for display.
 
@@ -233,10 +244,7 @@ if __name__ == "__main__":
     # Bind first, so a second copy fails before touching the first one's folders.
     server = make_server(HOST, PORT, create_app(), threaded=True)
     remove_stale_workdirs()
-    # Turn kill and closed-terminal signals into a normal exit so the
-    # JobStore's atexit cleanup runs, as it does for Ctrl+C.
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda *_: sys.exit(0))
+    install_exit_handlers()
     print(f"Serving on http://{HOST}:{PORT} (stop with Ctrl+C)")
     try:
         server.serve_forever()
