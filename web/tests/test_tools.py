@@ -142,6 +142,16 @@ KEYS = {"abuseipdb": "a" * 40, "virustotal": "v" * 64}
 @mock.patch("tools.threat_lookup.lookup_hash", return_value={"malicious": 0})
 @mock.patch("tools.threat_lookup.lookup_ip", return_value={"abuse_score": 0})
 class IocAdapterTests(unittest.TestCase):
+    def test_invalid_lines_finds_only_lines_that_are_not_indicators(self, *_):
+        text = "\n".join((
+            "# comment", "", "8.8.8.8", "2001:4860:4860::8888", "1[.]2[.]3[.]4", "2001[:]db8::1",
+            "d41d8cd98f00b204e9800998ecf8427e",
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "d41d8cd98f00b204e9800998ecf8427",
+            "8.8.8.8:443", "8.8.8.0/24", "evil.example"))
+        self.assertEqual(tools.invalid_lines(text), [10, 11, 12, 13])
+
     def test_parse_indicators_refangs_and_dedupes(self, *_):
         text = "1[.]2[.]3[.]4\n\n# note\n1.2.3.4\n" + MD5
         self.assertEqual(tools.parse_indicators(text), ["1.2.3.4", MD5])

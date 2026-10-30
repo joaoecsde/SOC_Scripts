@@ -26,7 +26,9 @@ def has_key(key: str) -> bool:
 HASH_RE  = re.compile(r"^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$")
 
 def is_ip(value: str) -> bool:
-    """Any valid IPv4 or IPv6 address."""
+    """Any valid IPv4 or IPv6 address, without an IPv6 ``%`` scope (it can hold any text)."""
+    if "%" in value:
+        return False
     try:
         ipaddress.ip_address(value.strip())
         return True

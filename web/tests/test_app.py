@@ -5,6 +5,7 @@ Run from the web folder:
 """
 import io
 import os
+import re
 import sys
 import threading
 import time
@@ -45,6 +46,15 @@ class AppTests(unittest.TestCase):
         self.app.testing = True
         self.client = self.app.test_client()
 
+    def csrf_token(self):
+        """Read the token from the landing page, as a browser would."""
+        page = self.client.get("/").get_data(as_text=True)
+        return re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+
+    def post(self, path, data=None, **kwargs):
+        fields = dict(data or {}, csrf_token=self.csrf_token())
+        return self.client.post(path, data=fields, **kwargs)
+
     def wait(self, response):
         """Follow a 303 to the job page and wait for the job to finish."""
         self.assertEqual(response.status_code, 303)
@@ -56,8 +66,8 @@ class AppTests(unittest.TestCase):
     def post_file(self, tool, data, name, content, **extra):
         fields = {"file": (io.BytesIO(content), name)}
         fields.update(extra)
-        return self.client.post(f"/analyse/{tool}", data=fields,
-                                content_type="multipart/form-data")
+        return self.post(f"/analyse/{tool}", data=fields,
+                         content_type="multipart/form-data")
 
     def test_index_has_three_tabs(self):
         body = self.client.get("/").get_data(as_text=True)
@@ -74,7 +84,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(resp.get_json()["source"], "evil.eml")
 
     def test_missing_file(self):
-        resp = self.client.post("/analyse/email", data={})
+        resp = self.post("/analyse/email", data={})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Choose a file to analyse.", resp.get_data(as_text=True))
 
@@ -90,31 +100,31 @@ class AppTests(unittest.TestCase):
         self.assertIn("AbuseIPDB key", resp.get_data(as_text=True))
 
     def test_ioc_requires_needed_key(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "8.8.8.8"})
+        resp = self.post("/analyse/ioc", data={"indicators": "8.8.8.8"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Add an AbuseIPDB key", resp.get_data(as_text=True))
 
     def test_ioc_empty(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "  "})
+        resp = self.post("/analyse/ioc", data={"indicators": "  "})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Paste at least one IP or hash.", resp.get_data(as_text=True))
 
     def test_ioc_private_ip_needs_no_key(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1"})
+        resp = self.post("/analyse/ioc", data={"indicators": "10.0.0.1"})
         self.wait(resp)
 
     def test_max_age_range(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1", "max_age": "0"})
+        resp = self.post("/analyse/ioc", data={"indicators": "10.0.0.1", "max_age": "0"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("between 1 and 365", resp.get_data(as_text=True))
 
     def test_bad_delay(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1", "delay": "-1"})
+        resp = self.post("/analyse/ioc", data={"indicators": "10.0.0.1", "delay": "-1"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Delay must be a number of seconds from 0 to 300.", resp.get_data(as_text=True))
 
     def test_delay_above_cap(self):
-        resp = self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1", "delay": "301"})
+        resp = self.post("/analyse/ioc", data={"indicators": "10.0.0.1", "delay": "301"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("from 0 to 300", resp.get_data(as_text=True))
 
@@ -129,7 +139,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("from 0 to 300", resp.get_data(as_text=True))
 
     def test_ioc_placeholder_key_rejected(self):
-        resp = self.client.post("/analyse/ioc", data={
+        resp = self.post("/analyse/ioc", data={
             "indicators": "8.8.8.8", "abuseipdb_key": "your_key_here"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Add an AbuseIPDB key", resp.get_data(as_text=True))
@@ -147,7 +157,7 @@ class AppTests(unittest.TestCase):
     def test_status_endpoint_has_no_keys(self):
         fake = {"abuseipdb_score": 5}
         with mock.patch("threat_lookup.lookup_ip", return_value=fake):
-            resp = self.client.post("/analyse/ioc", data={
+            resp = self.post("/analyse/ioc", data={
                 "indicators": "8.8.8.8", "abuseipdb_key": SECRET})
             job, path = self.wait(resp)
         self.assertNotIn("KEYSECRET", self.client.get(path + "/status").get_data(as_text=True))
@@ -155,7 +165,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("KEYSECRET", self.client.get(path).get_data(as_text=True))
 
     def test_validation_error_does_not_echo_keys(self):
-        resp = self.client.post("/analyse/ioc", data={
+        resp = self.post("/analyse/ioc", data={
             "indicators": "", "abuseipdb_key": SECRET})
         self.assertEqual(resp.status_code, 400)
         self.assertNotIn("KEYSECRET", resp.get_data(as_text=True))
@@ -174,9 +184,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.client.get(path + "/payloads").status_code, 404)
 
     def test_msg_upload_shows_plain_error(self):
-        job, path = self.wait(self.post_file("email", None, "a.msg", samples.msg_file()))
-        body = self.client.get(path).get_data(as_text=True)
-        self.assertIn(".eml", body)
+        resp = self.post_file("email", None, "a.msg", samples.msg_file())
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_data(as_text=True)
+        self.assertIn("Outlook", body)
         self.assertNotIn("Traceback", body)
 
     def test_unknown_job_404_page(self):
@@ -233,12 +244,145 @@ class AppTests(unittest.TestCase):
                 "is_tor": False, "is_whitelisted": False, "last_reported": None,
                 "usage_type": "Data Center"}
         with mock.patch("threat_lookup.lookup_ip", return_value=fake):
-            resp = self.client.post("/analyse/ioc", data={
+            resp = self.post("/analyse/ioc", data={
                 "indicators": "8.8.8.8", "abuseipdb_key": SECRET})
             job, path = self.wait(resp)
         body = self.client.get(path).get_data(as_text=True)
         self.assertIn("Evil ISP", body)
         self.assertIn("90", body)
+
+    def assert_refused(self, resp, status=400):
+        """The request was answered with an error and no job was started."""
+        self.assertEqual(resp.status_code, status)
+        self.assertEqual(self.store._jobs, {})
+
+    def test_ioc_refuses_anything_but_ips_and_hashes(self):
+        for line in ("' OR 1=1--", "; rm -rf /", "<script>alert(1)</script>", "evil[.]com",
+                     "hxxp://evil[.]com/x", "$(whoami)", "44d88612fea8a8f36de82e1278abb02",
+                     "2606:4700:4700::1111%' OR 1=1--"):
+            with self.subTest(line=line):
+                resp = self.post("/analyse/ioc", data={"indicators": line})
+                self.assert_refused(resp)
+                self.assertIn("Line 1 ", resp.get_data(as_text=True))
+
+    def test_ioc_refused_input_is_not_rendered(self):
+        resp = self.post("/analyse/ioc", data={"indicators": "10.0.0.1\nMARKER' OR 1=1--"})
+        self.assert_refused(resp)
+        body = resp.get_data(as_text=True)
+        self.assertNotIn("MARKER", body)
+        self.assertNotIn("10.0.0.1", body)
+
+    def test_ioc_one_bad_line_refuses_the_whole_list(self):
+        text = "10.0.0.1\nnope\n\n# a comment\nalso nope"
+        resp = self.post("/analyse/ioc", data={"indicators": text})
+        self.assert_refused(resp)
+        self.assertIn("Lines 2, 5 ", resp.get_data(as_text=True))
+
+    def test_ioc_accepts_defanged_ip_and_comments(self):
+        resp = self.post("/analyse/ioc", data={"indicators": "# note\n10[.]0[.]0[.]1"})
+        self.wait(resp)
+
+    def test_pdf_refuses_wrong_files(self):
+        pdf = samples.js_pdf()
+        for name, content in (("evil.exe", pdf), ("a.txt", pdf), ("noextension", pdf),
+                              ("x.pdf", b"#!/bin/sh\nrm -rf /\n# %PDF-\n"),
+                              ("mz.pdf", b"MZ\x90\x00" + b"A" * 50 + b"%PDF-1.4\n"),
+                              ("elf.pdf", b"\x7fELF" + b"A" * 50 + b"%PDF-1.4\n"),
+                              ("notes.pdf", samples.not_pdf()),
+                              ("late.pdf", b"A" * 1024 + pdf)):
+            with self.subTest(name=name):
+                self.assert_refused(self.post_file("pdf", None, name, content))
+
+    def test_pdf_accepts_junk_before_header_within_window(self):
+        for name, content in (("a.pdf", b"junk\n" + samples.js_pdf()),
+                              ("A.PDF", b"A" * 1019 + samples.js_pdf())):
+            with self.subTest(name=name):
+                job, _ = self.wait(self.post_file("pdf", None, name, content))
+                self.assertEqual(job.status, "done")
+
+    def test_email_refuses_wrong_files(self):
+        for name, content in (("evil.exe", samples.phishing_eml()),
+                              ("x.sh", b"From: a@b.example\n\nrm -rf /\n"),
+                              ("a.pdf", samples.phishing_eml()),
+                              ("subject.eml", b"Subject: only this\n\nhello\n"),
+                              ("date.txt", b"Date: Mon, 1 Jan 2024 10:00:00 +0000\n"),
+                              ("text.txt", b"just some text\n"),
+                              ("doc.eml", b"%PDF-1.4\nFrom: a@b.example\n")):
+            with self.subTest(name=name):
+                self.assert_refused(self.post_file("email", None, name, content))
+
+    def test_email_accepts_eml_and_header_text(self):
+        for name, content in (("a.EML", samples.phishing_eml()),
+                              ("from.txt", b"From: a@b.example\n"),
+                              ("relay.txt", b"Received: from a by b\n")):
+            with self.subTest(name=name):
+                job, _ = self.wait(self.post_file("email", None, name, content))
+                self.assertEqual(job.status, "done")
+
+    def test_email_with_unparsable_headers_gets_a_plain_refusal(self):
+        nested = b"".join(b"Content-Type: multipart/mixed; boundary=b%d\n\n--b%d\n" % (i, i)
+                          for i in range(1000))
+        for name, content in (("group.eml", b"From: group:; \nSubject: x\n"),
+                              ("word.eml", b"From: =?utf-8?B?!!!?=\n"),
+                              ("angle.eml", b"From: <\n"),
+                              ("nested.eml", b"From: a@b.example\n" + nested)):
+            with self.subTest(name=name):
+                resp = self.post_file("email", None, name, content)
+                if resp.status_code == 303:
+                    job, _ = self.wait(resp)
+                    self.assertIn(job.status, ("done", "error"))
+                else:
+                    self.assertEqual(resp.status_code, 400)
+
+    def test_email_with_malformed_from_is_still_analysed(self):
+        job, _ = self.wait(self.post_file("email", None, "a.eml",
+                                          b"From: (\nSubject: hi\n\nbody\n"))
+        self.assertEqual(job.status, "done")
+
+    def test_post_without_csrf_token_is_refused(self):
+        self.assert_refused(self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1"}))
+
+    def test_post_with_wrong_csrf_token_is_refused(self):
+        resp = self.client.post("/analyse/ioc", data={"indicators": "10.0.0.1",
+                                                      "csrf_token": "guess"})
+        self.assert_refused(resp)
+
+    def test_csrf_token_differs_between_servers(self):
+        other = webapp.create_app(self.store).test_client()
+        page = other.get("/").get_data(as_text=True)
+        self.assertNotIn(self.csrf_token(), page)
+
+    def test_csrf_failure_shows_error_on_the_tab_it_came_from(self):
+        for tool in ("email", "ioc", "pdf"):
+            with self.subTest(tool=tool):
+                resp = self.client.post(f"/analyse/{tool}", data={"csrf_token": "stale"})
+                self.assert_refused(resp)
+                body = resp.get_data(as_text=True)
+                self.assertIn(f'action="/analyse/{tool}"', body)
+                self.assertIn(webapp.STALE_FORM, body)
+
+    def test_csrf_failure_page_can_resubmit(self):
+        page = self.client.post("/analyse/ioc", data={}).get_data(as_text=True)
+        self.assertIn(self.csrf_token(), page)
+
+    def test_csrf_failure_keeps_keys_out_of_page(self):
+        resp = self.client.post("/analyse/ioc", data={"abuseipdb_key": SECRET})
+        self.assertNotIn("KEYSECRET", resp.get_data(as_text=True))
+
+    def test_foreign_host_is_refused(self):
+        token = self.csrf_token()
+        for host in ("evil.example", "evil.example:8765", "127.0.0.1.evil.example"):
+            with self.subTest(host=host):
+                headers = {"Host": host}
+                self.assertEqual(self.client.get("/", headers=headers).status_code, 400)
+                self.assert_refused(self.client.post(
+                    "/analyse/ioc", data={"indicators": "10.0.0.1", "csrf_token": token},
+                    headers=headers))
+
+    def test_local_hosts_are_served(self):
+        for host in ("127.0.0.1:8765", "localhost:8765", "localhost"):
+            with self.subTest(host=host):
+                self.assertEqual(self.client.get("/", headers={"Host": host}).status_code, 200)
 
 
 if __name__ == "__main__":
