@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import secrets
 import signal
 import sys
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from tools import ToolError
 
 HOST = "127.0.0.1"
 PORT = 8765
+LOCAL_HOSTNAMES = (HOST, "localhost")
 MAX_UPLOAD_MB = 25
 TOOLS = ("email", "ioc", "pdf")
 DEFAULT_DELAY = "15"
@@ -31,6 +33,18 @@ MAX_DELAY = 300
 DELAY_ERROR = "Delay must be a number of seconds from 0 to 300."
 DEFAULT_MAX_AGE = "90"
 EXPIRED = "This result has expired or never existed. Run the analysis again."
+STALE_FORM = "This page is out of date or the request did not come from it. Try again."
+
+
+def install_exit_handlers() -> None:
+    """Turn kill and closed-terminal signals into a normal exit.
+
+    This lets the JobStore's atexit cleanup run, as it does for Ctrl+C.
+    SIGHUP is Unix only; Windows raises SIGBREAK when the console closes.
+    """
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: sys.exit(0))
 
 
 def utc_date(epoch) -> str:
@@ -62,11 +76,27 @@ def create_app(store: Optional[JobStore] = None) -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
     app.jinja_env.filters["defang"] = tools.defang
     app.jinja_env.filters["utc"] = utc_date
+    # One per server run: the app has a single local user and no login.
+    csrf_token = secrets.token_urlsafe(32)
+    app.jinja_env.globals["csrf_token"] = csrf_token
+
+    @app.before_request
+    def refuse_forged_requests():
+        """Refuse DNS-rebound hosts, which could read the token, then forged POSTs."""
+        if request.host.split(":")[0] not in LOCAL_HOSTNAMES:
+            abort(400)
+        sent = request.form.get("csrf_token", "") if request.method == "POST" else csrf_token
+        if not secrets.compare_digest(sent.encode(), csrf_token.encode()):
+            tab = request.path.rsplit("/", 1)[-1]
+            tab = tab if tab in TOOLS else "email"
+            return form_page(tab, {"indicators" if tab == "ioc" else "file": STALE_FORM})
 
     def form_page(tab: str, errors: Dict[str, str], status: int = 400):
-        """Re-render the landing page with messages; keys are never passed back."""
+        """Re-render the landing page with messages; keys and refused text are never passed back."""
         values = {name: request.form.get(name, "")
                   for name in ("delay", "indicators", "max_age")}
+        if "indicators" in errors:
+            values["indicators"] = ""
         values["online"] = "online" in request.form
         values["extract"] = "extract" in request.form
         return render_template("index.html", tab=tab, errors=errors, form=values), status
@@ -114,6 +144,10 @@ def create_app(store: Optional[JobStore] = None) -> Flask:
         upload = read_upload()
         if upload is None:
             return form_page("email", {"file": "Choose a file to analyse."})
+        try:
+            tools.check_email_upload(*upload)
+        except ToolError as e:
+            return form_page("email", {"file": str(e)})
         online = "online" in request.form
         keys = keys_from_form(request.form) if online else None
         if online:
@@ -134,7 +168,14 @@ def create_app(store: Optional[JobStore] = None) -> Flask:
 
     @app.post("/analyse/ioc")
     def analyse_ioc():
-        indicators = tools.parse_indicators(request.form.get("indicators", ""))
+        text = request.form.get("indicators", "")
+        bad = tools.invalid_lines(text)
+        if bad:
+            numbers = ", ".join(str(n) for n in bad)
+            message = (f"Line {numbers} is not an IP or hash." if len(bad) == 1
+                       else f"Lines {numbers} are not IPs or hashes.")
+            return form_page("ioc", {"indicators": message})
+        indicators = tools.parse_indicators(text)
         if not indicators:
             return form_page("ioc", {"indicators": "Paste at least one IP or hash."})
         keys = keys_from_form(request.form)
@@ -164,6 +205,10 @@ def create_app(store: Optional[JobStore] = None) -> Flask:
         upload = read_upload()
         if upload is None:
             return form_page("pdf", {"file": "Choose a file to analyse."})
+        try:
+            tools.check_pdf_upload(*upload)
+        except ToolError as e:
+            return form_page("pdf", {"file": str(e)})
         extract = "extract" in request.form
         name, data = upload
 
@@ -233,10 +278,7 @@ if __name__ == "__main__":
     # Bind first, so a second copy fails before touching the first one's folders.
     server = make_server(HOST, PORT, create_app(), threaded=True)
     remove_stale_workdirs()
-    # Turn kill and closed-terminal signals into a normal exit so the
-    # JobStore's atexit cleanup runs, as it does for Ctrl+C.
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda *_: sys.exit(0))
+    install_exit_handlers()
     print(f"Serving on http://{HOST}:{PORT} (stop with Ctrl+C)")
     try:
         server.serve_forever()

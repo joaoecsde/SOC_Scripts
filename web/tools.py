@@ -20,7 +20,7 @@ for _folder in ("Email_analyser", "PDF_analyser", "IP_Hash_Check"):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from email_analyser_lib.loader import InputError, load_message   # noqa: E402
+from email_analyser_lib.loader import InputError, load_message, parse_email  # noqa: E402
 from email_analyser_lib.online import has_key                    # noqa: E402
 from email_analyser_lib.pipeline import analyse_message          # noqa: E402
 from email_analyser_lib.report import to_json                    # noqa: E402
@@ -30,6 +30,10 @@ from pdf_analyser_lib.pipeline import analyse_pdf                # noqa: E402
 import threat_lookup                                             # noqa: E402
 
 Progress = Callable[[int, int, str], None]
+
+EMAIL_SUFFIXES = (".eml", ".txt")
+EXECUTABLE_SIGNATURES = (b"MZ", b"\x7fELF", b"#!")
+NOT_PDF = "This file is not a PDF: it has no %PDF- header in the first 1024 bytes."
 
 
 class ToolError(Exception):
@@ -45,6 +49,58 @@ def check_online_keys(keys: dict) -> None:
 def usable_key(key: str) -> bool:
     """Return True for a real API key; empty and template placeholders are not."""
     return has_key(key or "")
+
+
+def _sentence(text: str) -> str:
+    """Capitalise an ``InputError`` message for display."""
+    return text[:1].upper() + text[1:]
+
+
+def check_email_upload(name: str, data: bytes) -> None:
+    """Accept only a .eml, or a .txt of raw headers, with a From or Received header.
+
+    The content is checked first so an Outlook .msg still gets its help text.
+    Hostile headers can crash the standard library parser, and this runs outside
+    the job's error handling, so any parser failure is a refusal.
+
+    Args:
+        name: Original file name.
+        data: File contents.
+
+    Raises:
+        ToolError: If the file is not accepted.
+    """
+    try:
+        msg, _ = parse_email(data)
+    except InputError as e:
+        raise ToolError(_sentence(str(e)))
+    except Exception:
+        raise ToolError("The headers of this file are too malformed to read.")
+    if not name.lower().endswith(EMAIL_SUFFIXES):
+        raise ToolError("Only .eml files, or .txt files of raw headers, can be analysed here.")
+    if "From" not in msg and "Received" not in msg:
+        raise ToolError("This file has no From: or Received: header, so it is not an email.")
+
+
+def check_pdf_upload(name: str, data: bytes) -> None:
+    """Accept only a .pdf that has a PDF header and is not a program or script.
+
+    The header may sit anywhere in the first 1024 bytes: PDF readers allow
+    that, and malicious samples use it to dodge scanners.
+
+    Args:
+        name: Original file name.
+        data: File contents.
+
+    Raises:
+        ToolError: If the file is not accepted.
+    """
+    if not name.lower().endswith(".pdf"):
+        raise ToolError("Only .pdf files can be analysed here.")
+    if data.startswith(EXECUTABLE_SIGNATURES):
+        raise ToolError("This file is a program or script, not a PDF.")
+    if b"%PDF-" not in data[:1024]:
+        raise ToolError(NOT_PDF)
 
 
 def run_email(path: str, filename: str, keys: Optional[dict], delay: float,
@@ -69,8 +125,7 @@ def run_email(path: str, filename: str, keys: Optional[dict], delay: float,
     try:
         msg, warnings = load_message(path)
     except InputError as e:
-        text = str(e)
-        raise ToolError(text[:1].upper() + text[1:])
+        raise ToolError(_sentence(str(e)))
     result = analyse_message(msg, keys=keys, delay=delay, warnings=warnings, progress=progress)
     out = to_json(result)
     out["source"] = filename
@@ -106,7 +161,7 @@ def run_pdf(path: str, filename: str, extract: bool, workdir: Path) -> dict:
     except OSError as e:
         raise ToolError(f"Could not read the uploaded file: {e.strerror or e}")
     if b"%PDF-" not in head:
-        raise ToolError("This file is not a PDF: it has no %PDF- header in the first 1024 bytes.")
+        raise ToolError(NOT_PDF)
 
     stage = PayloadStage(Path(tempfile.mkdtemp(dir=workdir))) if extract else None
     try:
@@ -153,6 +208,19 @@ def parse_indicators(text: str) -> List[str]:
         if line not in seen:
             seen.append(line)
     return seen
+
+
+def invalid_lines(text: str) -> List[int]:
+    """Return the 1-based numbers of lines that are not an IP, a hash, blank or a ``#`` comment."""
+    bad = []
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = threat_lookup.refang(line)
+        if not (threat_lookup.is_ip(line) or threat_lookup.is_hash(line)):
+            bad.append(number)
+    return bad
 
 
 def needed_keys(indicators: List[str]) -> Set[str]:

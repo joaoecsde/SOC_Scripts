@@ -45,6 +45,10 @@ def run(argv):
 
 
 class TestDetection(unittest.TestCase):
+    def test_ipv6_with_trailing_text_is_not_an_ip(self):
+        self.assertFalse(tl.is_ip("2606:4700:4700::1111%' OR 1=1--"))
+        self.assertFalse(tl.is_ip("fe80::1%eth0"))
+
     def test_valid_ipv4(self):
         self.assertTrue(tl.is_ip("8.8.8.8"))
 

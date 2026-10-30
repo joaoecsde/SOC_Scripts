@@ -23,9 +23,9 @@ From the repo root:
 python3 web/app.py
 ```
 
-Then open <http://127.0.0.1:8765> in your browser. Stop it with Ctrl+C.
+Then open <http://127.0.0.1:8765> in your browser. Stop it with Ctrl+C. Open forms again after a restart: each server run has a new CSRF token, so a page left open from the last run is refused until you reload it.
 
-The server listens on `127.0.0.1` only, port `8765`. Both are set at the top of `web/app.py`, as is the upload size limit (`MAX_UPLOAD_MB`, default 25). Restart the server after changing any of them.
+The server listens on `127.0.0.1` only, port `8765`. Both are set at the top of `web/app.py`, as is the upload size limit (`MAX_UPLOAD_MB`, default 25). `HOST` must be a specific address: only `HOST` and `localhost` are accepted as hostnames, so with `0.0.0.0` a request to the machine's own IP, or to `127.0.0.1`, is refused. Restart the server after changing any of them.
 
 ---
 
@@ -33,7 +33,7 @@ The server listens on `127.0.0.1` only, port `8765`. Both are set at the top of 
 
 ### Email
 
-Upload an `.eml` or a `.txt` file of raw headers (up to 25 MB by default, see `MAX_UPLOAD_MB`).
+Upload an `.eml` or a `.txt` file of raw headers (up to 25 MB by default, see `MAX_UPLOAD_MB`). Any other file type, or a file with no `From:` or `Received:` header, is refused before analysis starts.
 
 | Option | What it does |
 |---|---|
@@ -42,7 +42,7 @@ Upload an `.eml` or a `.txt` file of raw headers (up to 25 MB by default, see `M
 
 ### IP and hash
 
-Paste one IP or hash per line. Defanged values such as `185[.]220[.]101[.]4` work.
+Paste one IP or hash per line. Defanged values such as `185[.]220[.]101[.]4` work. If any line is something else, the whole list is refused: nothing is looked up, the error gives only the line numbers, and the box is cleared.
 
 | Option | What it does |
 |---|---|
@@ -55,7 +55,7 @@ If one lookup fails (bad key, rate limit, timeout), that row shows a plain messa
 
 ### PDF
 
-Upload a PDF (up to 25 MB by default, see `MAX_UPLOAD_MB`).
+Upload a PDF (up to 25 MB by default, see `MAX_UPLOAD_MB`). Only `.pdf` files with a `%PDF-` header in the first 1024 bytes are accepted, and programs or scripts renamed to `.pdf` are refused before analysis starts.
 
 | Option | What it does |
 |---|---|
@@ -76,7 +76,7 @@ Upload a PDF (up to 25 MB by default, see `MAX_UPLOAD_MB`).
 
 ## Limits
 
-- **Localhost only.** There is no login and no CSRF protection.
+- **Localhost only.** There is no login. Forms carry a CSRF token, and requests whose Host is not `HOST` or `localhost` are refused.
 - Running two hash batches at once can exceed VirusTotal's free-tier limit; the affected rows show HTTP 429. Run batches one at a time.
 - Uploads over `MAX_UPLOAD_MB` (25 MB by default) are rejected with a message on the landing page. To raise it, change `MAX_UPLOAD_MB` at the top of `web/app.py`. Larger files take more memory and time to analyse, and each upload runs at the same time as any others. Raising it does not change the PDF analyser's separate 64 MB cap on each decompressed stream (`MAX_STREAM_BYTES` in `PDF_analyser/pdf_analyser_lib/config.py`), which protects against decompression bombs.
 

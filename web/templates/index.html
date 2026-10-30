@@ -22,6 +22,7 @@
 
   <form id="tool-form" method="post" action="/analyse/{{ tab }}" enctype="multipart/form-data">
     <input type="hidden" name="tool" value="{{ tab }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
     <!-- Email -->
     <fieldset {{ pane("email") }}>
@@ -118,7 +119,7 @@
       <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m16 15 2 2 4-4"/></svg></div>
         <h3>Mix IPs and hashes</h3><p>Paste a list and each line is recognised as an IP, MD5, SHA-1 or SHA-256 on its own.</p></div>
       <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H5v16h3M16 4h3v16h-3"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/></svg></div>
-        <h3>Defanged input works</h3><p>Copy straight from a ticket. Values like 1[.]2[.]3[.]4 or hxxp are cleaned up before the lookup.</p></div>
+        <h3>Defanged input works</h3><p>Copy straight from a ticket. Values like 1[.]2[.]3[.]4 are cleaned up before the lookup.</p></div>
       <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="M12 8v5M12 16h.01"/></svg></div>
         <h3>IP abuse score</h3><p>AbuseIPDB confidence score, number of reports and how many people filed them, and when it was last reported.</p></div>
       <div class="feat"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-6 7 6v11"/><path d="M10 21v-6h4v6"/></svg></div>
